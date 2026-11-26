@@ -20,7 +20,7 @@
 #include "process/StatementNotice.h"
 #include "parser/parser.h"
 #include "parser/ViewOptions.h"
-#include "expression/aggregate_type.h"
+#include "commands/ViewWriteShape.h"
 #include "catalog/CatalogService.h"
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
@@ -11231,50 +11231,6 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
 // A view stores parse-time dependencies, independently of execution demand.
 // Use bound occurrence/column ordinals: aliases, repeated table occurrences,
 // expanded stars and lexical children must never become name guesses here.
-template<class Visit>
-static void visitViewExpression(const Expr* root, Visit visit) {
-    std::function<void(const Expr*)> expression;
-    const auto window = [&](const WindowDef& definition) {
-        for (const auto& item : definition.partitionBy) expression(item.get());
-        for (const auto& item : definition.orderBy) expression(item.first.get());
-        expression(definition.frameStart.get());
-        expression(definition.frameEnd.get());
-    };
-    expression = [&](const Expr* node) {
-        if (!node || node->preparedSubquery) return;
-        visit(*node);
-        if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node)) {
-            expression(unary->operand.get());
-        } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
-            expression(binary->left.get()); expression(binary->right.get());
-        } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
-            for (const auto& argument : call->args) expression(argument.get());
-            for (const auto& argument : call->namedArgs) expression(argument.value.get());
-            expression(call->filter.get());
-            for (const auto& key : call->aggregateOrderKeys) expression(key.expr.get());
-            if (call->hasOver) window(call->over);
-        } else if (const auto* cast = dynamic_cast<const CastExpr*>(node)) {
-            expression(cast->operand.get());
-        } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
-            expression(conditional->switchExpr.get());
-            for (const auto& clause : conditional->whenClauses) {
-                expression(clause.first.get()); expression(clause.second.get());
-            }
-            expression(conditional->elseExpr.get());
-        } else if (const auto* array = dynamic_cast<const ArrayExpr*>(node)) {
-            for (const auto& item : array->elements) expression(item.get());
-        } else if (const auto* row = dynamic_cast<const RowExpr*>(node)) {
-            for (const auto& item : row->elements) expression(item.get());
-        } else if (const auto* comparison = dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
-            expression(comparison->left.get()); expression(comparison->right.get());
-        } else if (node->type != ExprType::ColumnRef && node->type != ExprType::Literal && node->type != ExprType::Parameter &&
-                   node->type != ExprType::A_Star) {
-            throw DbError("0A000", "view expression dependency is not implemented");
-        }
-    };
-    expression(root);
-}
-
 static ViewRelationDependencies boundViewRelationDependencies(
     const CatalogManager& catalog, const std::string& database, const PreparedQuery& prepared,
     const std::function<void(const ColumnRefExpr&)>& onColumn = {},
@@ -11352,7 +11308,7 @@ static ViewRelationDependencies boundViewRelationDependencies(
             if (item.column) bindingDependency(*item.column);
 
     const auto expression = [&](const Expr* root) {
-        visitViewExpression(root, [&](const Expr& node) {
+        view_write::visitExpression(root, [&](const Expr& node) {
             if (const auto* column = dynamic_cast<const ColumnRefExpr*>(&node)) {
                 if (column->binding) {
                     bindingDependency(*column->binding);
@@ -11470,37 +11426,14 @@ static void requireCheckableView(const CatalogManager& catalog, const PreparedQu
     const auto reject = [] {
         return DbError("0A000", "WITH CHECK OPTION is supported only on automatically updatable views");
     };
-    const auto* select = dynamic_cast<const SelectStmt*>(query.ast.get());
-    if (!select || !select->fromClause || select->fromClause->type != FromItem::Type::Table ||
-        select->distinct || !select->distinctOn.empty() || !select->groupBy.empty() ||
-        !select->groupByElems.empty() || select->having || select->setOp != SetOp::None ||
-        !select->ctes.empty() || select->hasRowCountClause || select->limit || select->offset ||
-        select->limitExpr || select->offsetExpr)
+    const auto* source = view_write::singleSource(query);
+    if (!source || !view_write::supportsSource(catalog, *source))
         throw reject();
-    const auto source = std::find_if(query.sourceRanges.begin(), query.sourceRanges.end(),
-        [&](const auto& range) { return range.owner == select && range.source == select->fromClause.get(); });
-    if (source == query.sourceRanges.end() || source->cteStatement) throw reject();
-    const auto space = catalog.getNamespaceByName(source->relationSchema);
-    const auto relation = space ? catalog.getClassByName(source->relationName, space->oid) : std::nullopt;
-    if (!relation || std::string_view("rfvp").find(relation->relkind) == std::string_view::npos)
-        throw reject();
+    const auto* select = static_cast<const SelectStmt*>(query.ast.get());
     const auto& projection = query.projectionBindings.at(select);
-    const auto columns = catalog.findAttributesByNum(relation->oid);
-    if (std::none_of(projection.begin(), projection.end(), [&](const auto& item) {
-            return item.column && item.column->scopeDepth == 0 &&
-                item.column->sourceOrdinal == source->ordinal && item.column->columnOrdinal < source->columns.size() &&
-                (source->columns[item.column->columnOrdinal].physicalAttributeNumber > 0 ||
-                 (source->columns[item.column->columnOrdinal].physicalAttributeNumber == 0 &&
-                  item.column->columnOrdinal < columns.size()));
-        }))
+    if (std::none_of(projection.begin(), projection.end(),
+            [&](const auto& item) { return view_write::directColumn(item, *source); }))
         throw reject();
-    const auto rejectChangingCardinality = [&](const Expr& node) {
-        const auto* call = dynamic_cast<const FunctionCallExpr*>(&node);
-        if (call && (call->hasOver || call->setReturning || !aggregate_type_detail::builtinName(call).empty()))
-            throw reject();
-    };
-    for (const auto& item : select->selectList) visitViewExpression(item.expr.get(), rejectChangingCardinality);
-    for (const auto& item : select->orderBy) visitViewExpression(item.expr.get(), rejectChangingCardinality);
 }
 
 static size_t storedViewCheckOptionOffset(const std::string& definition) {

@@ -1,6 +1,17 @@
 # 更新日志
 
 <details>
+<summary>只读视图会拒绝写入 · 2026-11-26</summary>
+
+例如，通过汇总视图插入或删除数据时，数据库会报错，原表里的数据不会变。
+
+这也覆盖只显示前几行、去重和排名的视图。通过普通可写视图修改数据时，仍会遵守视图的筛选条件。
+
+[测试报告](docs/test-report.md#read-only-view-writes-20261126) · [性能报告](docs/performance-report-2026-10-30.md#read-only-view-write-cost-20261126)
+
+</details>
+
+<details>
 <summary>已有视图也能开启或关闭写入检查 · 2026-11-26</summary>
 
 例如，可以给已有的报表视图开启检查，让它拒绝写入不符合筛选条件的数据。
@@ -23,18 +34,15 @@
 </details>
 
 <details>
-<summary>通过视图写入时可以检查新数据 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 通过视图写入时可以检查新数据
 
 例如，只显示正数的视图开启检查后，会拒绝把零或负数写进去。
 
 一次插入或修改多行时，只要有一行检查失败，这条命令写入的行就会全部撤销。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#view-check-option-20261126) · [性能报告](docs/performance-report-2026-10-30.md#view-check-option-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 可以给视图的列改名了
 

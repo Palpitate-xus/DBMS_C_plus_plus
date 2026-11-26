@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 在写入前识别只读视图
+
+PostgreSQL 按查询结构判断能否改写为对底表的操作。它还区分直接引用的列和计算列，并按具体命令处理 `INSTEAD OF` 触发器。SQLite 的普通视图可通过 `INSTEAD OF` 触发器处理写入。DuckDB 的普通视图保存查询，读取时执行。 [PostgreSQL 可更新视图](https://www.postgresql.org/docs/18/sql-createview.html#SQL-CREATEVIEW-UPDATABLE-VIEWS) · [PostgreSQL 改写实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/rewrite/rewriteHandler.c#L2539-L2649) · [SQLite CREATE VIEW](https://www.sqlite.org/lang_createview.html) · [DuckDB CREATE VIEW](https://duckdb.org/docs/2.0/sql/statements/create_view)
+
+本项目以实际绑定的查询为准，逐层检查视图是否可写。同一判断用于设置写入检查、准备语句和执行写入。已确认只读的形状会提前返回 `55000`。直接对视图定义的匹配触发器仍可处理对应的写入。 [功能测试](test-report.md#read-only-view-writes-20261126) · [性能报告](performance-report-2026-10-30.md#read-only-view-write-cost-20261126)
+
 ## 2026-11-26 · 修改视图的检查选项
 
 PostgreSQL 在视图创建时把 `WITH CHECK OPTION` 加到关系选项里，修改选项时校验视图是否可自动更新，并更新 `pg_class` 的选项列。SQLite 的普通视图可通过 `INSTEAD OF` 触发器处理写入。DuckDB 的文档展示了可随事务回滚的视图改名。 [PostgreSQL ALTER VIEW](https://www.postgresql.org/docs/18/sql-alterview.html) · [PostgreSQL CREATE VIEW 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/view.c#L371-L409) · [SQLite CREATE VIEW](https://www.sqlite.org/lang_createview.html) · [DuckDB ALTER VIEW](https://duckdb.org/docs/2.0/sql/statements/alter_view)

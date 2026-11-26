@@ -12,6 +12,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
+#include "commands/ViewWriteShape.h"
 #include "common/DbError.h"
 #include "common/SqlSyntax.h"
 #include "expression/ExprEvaluator.h"
@@ -6511,30 +6512,6 @@ struct WritableViewProjection {
     std::vector<size_t> columns;
 };
 
-std::optional<WritableViewProjection> writableViewProjection(const PreparedQuery& view) {
-    const auto* select = dynamic_cast<const SelectStmt*>(view.ast.get());
-    if (!select || !select->fromClause || select->fromClause->type != FromItem::Type::Table ||
-        select->fromClause->only || !select->fromClause->columnAliases.empty() ||
-        !select->ctes.empty() || select->distinct || !select->distinctOn.empty() ||
-        select->setOp != SetOp::None || !select->groupBy.empty() || !select->groupByElems.empty() ||
-        select->having || select->hasRowCountClause || select->limit || select->offset ||
-        select->limitExpr || select->offsetExpr || !select->locking.empty()) return std::nullopt;
-
-    const auto source = std::find_if(view.sourceRanges.begin(), view.sourceRanges.end(),
-        [&](const auto& range) { return range.owner == select && range.source == select->fromClause.get(); });
-    if (source == view.sourceRanges.end() || source->relationSchema.empty() ||
-        source->relationName.empty() || source->cteStatement ||
-        source->generatedRelation) return std::nullopt;
-
-    WritableViewProjection projection{&*source, select, {}};
-    for (const auto& value : view.projectionBindings.at(select)) {
-        if (!value.column || value.column->scopeDepth || value.column->sourceOrdinal != source->ordinal)
-            return std::nullopt;
-        projection.columns.push_back(value.column->columnOrdinal);
-    }
-    return projection;
-}
-
 struct WritableViewFilter {
     std::shared_ptr<PreparedQuery> query;
     const PreparedQuery::SourceRange* source;
@@ -6550,8 +6527,71 @@ struct WritableViewTarget {
     std::vector<WritableViewFilter> filters;
 };
 
-std::optional<WritableViewTarget> writableViewTarget(Session& session,
-    const PreparedQuery::SourceRange& target, const std::string& name, std::string_view event) {
+std::string_view viewWriteEvent(const Stmt& statement) {
+    switch (statement.command) {
+        case SqlCommand::Insert: return "insert";
+        case SqlCommand::Update: return "update";
+        case SqlCommand::Delete: return "delete";
+        default: return {};
+    }
+}
+
+[[noreturn]] void rejectReadOnlyView(const std::string& name, std::string_view event) {
+    const auto verb = event == "insert" ? "insert into" :
+        event == "delete" ? "delete from" : "update";
+    throw DbError("55000", std::string("cannot ") + verb + " view \"" + name + "\"");
+}
+
+std::string viewStorageName(const PreparedQuery::SourceRange& source) {
+    return source.relationSchema == "public" ? source.relationName :
+        source.relationSchema + "." + source.relationName;
+}
+
+const PreparedQuery::SourceRange& requireViewWriteSource(Session& session,
+    const PreparedQuery::SourceRange& view, std::string_view event) {
+    const auto& query = *view.viewQuery;
+    const auto* source = view_write::singleSource(query);
+    if (!source || (!source->viewQuery &&
+            !view_write::supportsSource(g_engine.catalogService().get(session.currentDB), *source)))
+        rejectReadOnlyView(view.relationName, event);
+    if (event != "delete") {
+        const auto* select = static_cast<const SelectStmt*>(query.ast.get());
+        const auto& columns = query.projectionBindings.at(select);
+        if (std::none_of(columns.begin(), columns.end(),
+                [&](const auto& column) { return view_write::directColumn(column, *source); }))
+            rejectReadOnlyView(view.relationName, event);
+    }
+    return *source;
+}
+
+bool hasInsteadOfViewTrigger(Session& session, const std::string& storageName,
+                            std::string_view event) {
+    std::vector<StorageEngine::Trigger> triggers;
+    if (!g_engine.tryGetTriggers(session.currentDB, storageName, "instead of", std::string(event), triggers))
+        throw DbError("58030", "could not read view trigger definitions");
+    return !triggers.empty();
+}
+
+size_t suppliedInsertColumns(const InsertStmt& insert, const PreparedQuery& query) {
+    if (insert.defaultValues) return 0;
+    return insert.selectSource ? query.statementOutputs.at(insert.selectSource.get()).size() :
+        insert.values.at(0).size();
+}
+
+size_t viewColumnOrdinal(const PreparedQuery::SourceRange& view, const std::string& name) {
+    const auto column = std::find_if(view.columns.begin(), view.columns.end(),
+        [&](const auto& field) { return field.name == name; });
+    if (column == view.columns.end())
+        throw DbError("42703", "view column does not exist: " + name);
+    return static_cast<size_t>(column - view.columns.begin());
+}
+
+constexpr size_t computedViewColumn = std::numeric_limits<size_t>::max();
+
+WritableViewTarget writableViewTarget(Session& session,
+    const PreparedQuery::SourceRange& target, const std::string& name,
+    const Stmt& statement, const PreparedQuery& mutation,
+    bool descendedFromPreparedStatement = false) {
     struct Layer {
         WritableViewProjection projection;
         const PreparedQuery::SourceRange* view;
@@ -6561,33 +6601,57 @@ std::optional<WritableViewTarget> writableViewTarget(Session& session,
     const auto* source = &target;
     std::string storageName = name;
     bool cascaded = false;
-    bool hasCheckOption = false;
+    const auto event = viewWriteEvent(statement);
     while (source->viewQuery) {
-        if (!layers.empty()) {
-            std::vector<StorageEngine::Trigger> triggers;
-            if (!g_engine.tryGetTriggers(session.currentDB, storageName, "instead of", std::string(event), triggers))
-                throw DbError("58030", "could not read view trigger definitions");
-            if (!triggers.empty()) {
-                if (hasCheckOption)
-                    throw DbError("0A000", "checked writes through a nested view trigger require additional rewriting");
-                return std::nullopt;
+        if ((!layers.empty() || descendedFromPreparedStatement) &&
+            hasInsteadOfViewTrigger(session, storageName, event))
+            throw DbError("0A000", "this write through a view trigger requires additional rewriting");
+
+        const auto& boundView = *source->viewQuery;
+        const auto* input = &requireViewWriteSource(session, *source, event);
+        const auto* select = static_cast<const SelectStmt*>(boundView.ast.get());
+        const auto& bindings = boundView.projectionBindings.at(select);
+        const auto direct = [&](const auto& item) { return view_write::directColumn(item, *input); };
+        if (select->fromClause->only || !select->fromClause->columnAliases.empty() ||
+            !select->locking.empty() || input->generatedRelation)
+            throw DbError("0A000", "this write form requires additional view rewriting");
+
+        if (!std::all_of(bindings.begin(), bindings.end(), direct)) {
+            if (!layers.empty())
+                throw DbError("0A000", "this write through nested computed columns requires additional view rewriting");
+            const auto requireDirect = [&](size_t ordinal, std::string_view command) {
+                if (!direct(bindings.at(ordinal)))
+                    throw DbError("0A000", std::string(command) + " column \"" +
+                        source->columns.at(ordinal).name + "\" of view \"" + source->relationName + "\"");
+            };
+            if (const auto* insert = dynamic_cast<const InsertStmt*>(&statement)) {
+                for (size_t i = 0; i < suppliedInsertColumns(*insert, mutation); ++i) {
+                    const size_t ordinal = insert->columns.empty() ? i :
+                        viewColumnOrdinal(*source, identifier(insert->columns.at(i)));
+                    requireDirect(ordinal, "cannot insert into");
+                }
+                // Only assignments are needed for a row-less INSERT result.
+                // Its check predicates read the input of this view, using
+                // their own descriptors rather than the computed outputs.
+                if (!insert->returning.empty())
+                    throw DbError("0A000", "returning computed view columns requires additional view rewriting");
+            } else {
+                if (const auto* update = dynamic_cast<const UpdateStmt*>(&statement))
+                    for (const auto& assignment : update->setClauses)
+                        requireDirect(viewColumnOrdinal(*source, identifier(assignment.first)), "cannot update");
+                throw DbError("0A000", "this write through computed view columns requires additional view rewriting");
             }
         }
 
         const auto option = event == "delete" ? std::string{} :
             lower(g_engine.getViewCheckOption(session.currentDB, storageName));
-        hasCheckOption |= !option.empty();
         cascaded |= option == "cascaded";
-        auto projection = writableViewProjection(*source->viewQuery);
-        if (!projection) {
-            if (hasCheckOption)
-                throw DbError("0A000", "could not bind the write target for a view with CHECK OPTION");
-            return std::nullopt;
-        }
-        layers.push_back({std::move(*projection), source, cascaded || !option.empty()});
-        source = layers.back().projection.source;
-        storageName = source->relationSchema == "public" ? source->relationName :
-            source->relationSchema + "." + source->relationName;
+        WritableViewProjection projection{input, select, {}};
+        for (const auto& item : bindings)
+            projection.columns.push_back(direct(item) ? item.column->columnOrdinal : computedViewColumn);
+        layers.push_back({std::move(projection), source, cascaded || !option.empty()});
+        source = input;
+        storageName = viewStorageName(*source);
     }
 
     WritableViewTarget result{source, std::vector<size_t>(source->columns.size()), {}};
@@ -6603,7 +6667,8 @@ std::optional<WritableViewTarget> writableViewTarget(Session& session,
         }
         std::vector<size_t> mapped;
         mapped.reserve(projection.columns.size());
-        for (const auto ordinal : projection.columns) mapped.push_back(result.columns.at(ordinal));
+        for (const auto ordinal : projection.columns)
+            mapped.push_back(ordinal == computedViewColumn ? ordinal : result.columns.at(ordinal));
         result.columns = std::move(mapped);
     }
     return result;
@@ -6632,19 +6697,20 @@ class BoundDmlExecution {
         std::unique_ptr<PreparedQueryExecution> oldRow;
         std::unique_ptr<PreparedQueryExecution> newRow;
     };
+    std::optional<WritableViewTarget> preparedView_;
     std::vector<ViewFilterExecution> viewFilters_;
     StorageEngine::SqlNewRowCheck viewRowCheck_;
 
     const Column& physicalColumn(size_t ordinal) const {
-        return table_.cols[viewSource_ ? viewColumns_.at(ordinal) : ordinal];
+        if (!viewSource_) return table_.cols[ordinal];
+        const auto physical = viewColumns_.at(ordinal);
+        if (physical == computedViewColumn)
+            throw DbError("XX000", "computed view column reached a physical row writer");
+        return table_.cols[physical];
     }
     std::string physicalColumnName(const std::string& name) const {
         if (!viewSource_) return name;
-        const auto column = std::find_if(target_->columns.begin(), target_->columns.end(),
-            [&](const auto& field) { return field.name == name; });
-        if (column == target_->columns.end())
-            throw DbError("42703", "view column does not exist: " + name);
-        return physicalColumn(static_cast<size_t>(column - target_->columns.begin())).dataName;
+        return physicalColumn(viewColumnOrdinal(*target_, name)).dataName;
     }
 
     bool matchesViewFilter(const WritableViewFilter& binding, PreparedQueryExecution& execution,
@@ -6905,6 +6971,13 @@ public:
         }
         if(!target_ || target_->cteStatement || target_->relationName.empty())
             throw DbError("XX000","prepared DML has no physical target identity");
+        if (!view && target_->viewQuery) {
+            const auto event = viewWriteEvent(*statement_);
+            if (event.empty()) throw DbError("0A000", "prepared statement cannot write to a view");
+            preparedView_ = writableViewTarget(
+                session_, *target_, viewStorageName(*target_), *statement_, *query_, true);
+            view = &*preparedView_;
+        }
         const auto& storedSource = view ? *view->source : *target_;
         const auto& name=storedSource.relationName;
         const bool temporary=storedSource.relationSchema==sessionTempSchemaName(session_) || storedSource.relationSchema=="pg_temp";
@@ -7106,13 +7179,11 @@ private:
         CapturedVirtualRows virtualRows(table_,!returning_->empty());
         if(auto* insert=dynamic_cast<InsertStmt*>(statement_)) {
             std::vector<std::string> columns;
-            if(insert->columns.empty())for(size_t i=0;i<target_->columns.size();++i)columns.push_back(physicalColumn(i).dataName);
+            const size_t supplied = viewSource_ ? suppliedInsertColumns(*insert, *query_) : target_->columns.size();
+            if(insert->columns.empty())for(size_t i=0;i<supplied;++i)columns.push_back(physicalColumn(i).dataName);
             else for(const auto& column:insert->columns)columns.push_back(physicalColumnName(identifier(column)));
             if (viewSource_) {
                 if (!insert->defaultValues) {
-                    const size_t supplied = insert->selectSource
-                        ? query_->statementOutputs.at(insert->selectSource.get()).size()
-                        : insert->values.at(0).size();
                     const std::set<std::string> distinct(columns.begin(), columns.begin() + supplied);
                     if (distinct.size() != supplied)
                         throw DbError("42701", "multiple view columns assign the same underlying column");
@@ -7474,6 +7545,56 @@ public:
 };
 } // namespace
 
+bool view_write::targetsView(Session& session, const Stmt* statement) {
+    if (session.currentDB.empty() || !statement) return false;
+    const std::string* target = nullptr;
+    if (const auto* insert = dynamic_cast<const InsertStmt*>(statement)) target = &insert->tableName;
+    else if (const auto* update = dynamic_cast<const UpdateStmt*>(statement)) target = &update->tableName;
+    else if (const auto* remove = dynamic_cast<const DeleteStmt*>(statement)) target = &remove->tableName;
+    if (target) {
+        CatalogManager::QualifiedName name;
+        if (!CatalogManager::parseQualifiedName(*target, name, true)) return false;
+        if (name.schema == "pg_temp") name.schema = activeTemporarySchema(&session);
+        const auto& catalog = g_engine.catalogService().get(session.currentDB);
+        auto searchPath = name.schema.empty() ? effectiveRelationSearchPath(&session) :
+            std::vector<std::string>{name.schema};
+        if (const auto relation = catalog.resolveRelationSnapshot(
+                SQLParser::quoteIdentifier(name.name), searchPath)) {
+            if (relation->relkind != 'v') return false;
+            const auto space = catalog.getNamespace(relation->relnamespace);
+            return space && space->nspname != "pg_catalog" && space->nspname != "information_schema";
+        }
+        // Older stored definitions may predate their relation catalog entry.
+        bool view = false;
+        bool materialized = false;
+        (void)resolveTable(session, *target, true, &view, &materialized);
+        return view && !materialized;
+    }
+    const auto writesView = [&](const auto& ctes) {
+        return std::any_of(ctes.begin(), ctes.end(), [&](const auto& cte) {
+            return targetsView(session, cte.query.get());
+        });
+    };
+    if (const auto* select = dynamic_cast<const SelectStmt*>(statement))
+        return writesView(select->ctes);
+    if (const auto* with = dynamic_cast<const WithStmt*>(statement))
+        return targetsView(session, with->statement.get()) || writesView(with->ctes);
+    return false;
+}
+
+void view_write::validate(Session& session, const PreparedQuery& query) {
+    for (const auto& target : query.sourceRanges) {
+        if (!target.owner || target.source || target.mergedUsing || !target.viewQuery) continue;
+        const auto event = viewWriteEvent(*target.owner);
+        if (event.empty()) continue;
+        const auto* source = &target;
+        while (source->viewQuery) {
+            if (hasInsteadOfViewTrigger(session, viewStorageName(*source), event)) break;
+            source = &requireViewWriteSource(session, *source, event);
+        }
+    }
+}
+
 std::unique_ptr<Operator> buildBoundDmlPlan(Stmt* statement,Session& session,
     const std::shared_ptr<PreparedQuery>& query,PreparedChildExecutor reader,
     PreparedDmlSourceFactory sourceFactory,PreparedChildCursorFactory cursorFactory,
@@ -7526,58 +7647,25 @@ DmlResult executeAtomicDmlUnit(Session& session,const std::function<DmlResult()>
     return result;
 }
 
-static bool legacyViewWriteNeedsColumnMapping(const PreparedQuery::SourceRange& target) {
-    const auto& view = *target.viewQuery;
-    const auto sameName = [](const auto& left, const auto& right) { return left.name == right.name; };
-    if (!std::equal(target.columns.begin(), target.columns.end(), view.output.begin(), view.output.end(), sameName))
-        return true;
-
-    const auto* select = dynamic_cast<const SelectStmt*>(view.ast.get());
-    const auto fields = view.projectionBindings.find(select);
-    if (fields != view.projectionBindings.end()) {
-        for (size_t i = 0; i < fields->second.size(); ++i) {
-            const auto& field = fields->second[i];
-            if (!field.column) continue;
-            const auto& source = view.sourceRanges.at(field.column->sourceOrdinal);
-            if (target.columns.at(i).name != source.columns.at(field.column->columnOrdinal).name)
-                return true;
-        }
-    }
-    return std::any_of(view.sourceRanges.begin(), view.sourceRanges.end(), [&](const auto& source) {
-        return source.owner == select && source.viewQuery && legacyViewWriteNeedsColumnMapping(source);
-    });
-}
-
 static bool executeProjectedViewDml(const Stmt& statement, Session& session,
     const std::string& storageName, const std::string& sql) {
     const auto* insert = dynamic_cast<const InsertStmt*>(&statement);
     const auto* update = dynamic_cast<const UpdateStmt*>(&statement);
     const auto* remove = dynamic_cast<const DeleteStmt*>(&statement);
-    const auto event = insert ? "insert" : update ? "update" : "delete";
-    std::vector<StorageEngine::Trigger> triggers;
-    if (!g_engine.tryGetTriggers(session.currentDB, storageName, "instead of", event, triggers))
-        throw DbError("58030", "could not read view trigger definitions");
+    const auto event = viewWriteEvent(statement);
+    const bool trigger = hasInsteadOfViewTrigger(session, storageName, event);
 
     // Validate the caller's names against the view even when an INSTEAD OF
     // trigger owns the write. A former view column is no longer assignable.
     auto query = std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB, sql));
-    if (!triggers.empty()) return false;
+    if (trigger) return false;
     const auto target = std::find_if(query->sourceRanges.begin(), query->sourceRanges.end(),
         [&](const auto& range) { return range.owner == query->ast.get() && !range.source && range.viewQuery; });
-    if (target == query->sourceRanges.end()) return false;
+    if (target == query->sourceRanges.end())
+        throw DbError("0A000", "could not bind the view write target");
 
-    auto projection = writableViewTarget(session, *target, storageName, event);
-    if (!projection) {
-        // Replacing just the relation name can silently write a different
-        // column after either the view or its source renames a column.
-        if (!g_engine.getViewBaseTable(session.currentDB, storageName).empty() &&
-            legacyViewWriteNeedsColumnMapping(*target))
-            throw DbError("0A000", "this write form requires additional view rewriting");
-        return false;
-    }
-    const auto& source = *projection->source;
-    if (g_engine.resolveMaterializedView(session.currentDB, source.relationSchema, source.relationName))
-        throw DbError("55000", "cannot modify a view of a materialized view");
+    auto projection = writableViewTarget(session, *target, storageName, *query->ast, *query);
+    const auto& source = *projection.source;
 
     if ((insert && (!insert->conflictAction.empty() || !insert->override_.empty())) ||
         (update && (update->only || !update->whereCurrentOf.empty() ||
@@ -7586,9 +7674,10 @@ static bool executeProjectedViewDml(const Stmt& statement, Session& session,
         (remove && (remove->only || !remove->whereCurrentOf.empty()))) {
         // The old relation-name substitution cannot be used once a view
         // changes projection names, ordering or row visibility.
-        if (projection->filters.empty() && projection->columns.size() == source.columns.size() &&
-            std::equal(projection->columns.begin(), projection->columns.end(), target->columns.begin(), target->columns.end(),
-                [&](size_t ordinal, const auto& field) { return source.columns.at(ordinal).name == field.name; })) return false;
+        if (projection.filters.empty() && projection.columns.size() == source.columns.size() &&
+            std::equal(projection.columns.begin(), projection.columns.end(), target->columns.begin(), target->columns.end(),
+                [&](size_t ordinal, const auto& field) { return ordinal < source.columns.size() &&
+                    source.columns[ordinal].name == field.name; })) return false;
         throw DbError("0A000", "this write form requires additional view rewriting");
     }
 
@@ -7609,7 +7698,7 @@ static bool executeProjectedViewDml(const Stmt& statement, Session& session,
     };
     auto output = executeAtomicDmlUnit(session, [&] {
         return BoundDmlExecution(query->ast.get(), session, query, sources.factory(), cursors, true,
-                                 false, {}, &*projection).run(read);
+                                 false, {}, &projection).run(read);
     });
     publishLastDmlResult(std::move(output));
     std::cout << g_lastDmlResult.commandTag << std::endl;

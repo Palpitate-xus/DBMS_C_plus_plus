@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 reject writes to structurally read-only views before rewriting or execution",
+      "gap_ids": ["CAT-16", "DML-01", "DML-03", "SQL-11"],
+      "status": "partial",
+      "evidence": ["src/commands/ViewWriteShape.h", "src/commands/DmlExecutor.cpp", "src/main.cpp", "src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/read_only_view_writes.sql", "tests/read_only_view_writes_protocol_e2e_test.py", "tests/writable_view_projection_protocol_e2e_test.py"],
+      "verification": [
+        "Compare read-only view diagnostics and supported prepared or CTE writes against PostgreSQL 18.6 through both wire protocols.",
+        "Verify matching view triggers still execute, blocked writes leave heap and sequences untouched, and older view files preserve the same protection after restart.",
+        "Measure rejection and writable-view deletion alongside a direct table control."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 create and alter check options on ordinary views",
       "gap_ids": ["CAT-16", "SQL-11", "TXN-05", "BACKUP-01"],
       "status": "partial",

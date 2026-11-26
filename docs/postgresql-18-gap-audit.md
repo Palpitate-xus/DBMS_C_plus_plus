@@ -1,10 +1,14 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 拒绝写入只读视图
+
+`INSERT`、`UPDATE` 和 `DELETE` 根据视图保存的查询判断是否可写。汇总、去重、限制行数、连接和其他只读视图会返回 `55000`，包括通过另一层视图发出的写入。`PREPARE` 和带写入的 `WITH` 会提前检查。直接读取原表列的可写视图支持受测的 SQL `PREPARE` / `EXECUTE` 和带 `WITH` 的写入。表列与计算列混合时，支持只给表列赋值的 `INSERT`，计算列的读取和结果返回仍有差距。`CAT-16`、`DML-01`、`DML-03`、`SQL-11` 保持部分实现。 [功能测试](test-report.md#read-only-view-writes-20261126) · [性能报告](performance-report-2026-10-30.md#read-only-view-write-cost-20261126)
+
 ## 2026-11-26 · 修改已有视图的写入检查
 
-普通视图支持在创建时用 `WITH (check_option = …)` 指定检查，也可以通过 `ALTER VIEW … SET` 或 `RESET` 开启、切换和关闭。修改会保留视图编号、注释和依赖。没有修改定义的错误和跳过路径无需保存整库。PostgreSQL 的系统目录选项列、SQL `PREPARE` 下的视图写入和更复杂的可写视图仍有差距。`CAT-16`、`SQL-11`、`TXN-05`、`BACKUP-01` 保持部分实现。 [功能测试](test-report.md#alter-view-check-option-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-check-option-cost-20261126)
+普通视图支持在创建时用 `WITH (check_option = …)` 指定检查，也可以通过 `ALTER VIEW … SET` 或 `RESET` 开启、切换和关闭。修改会保留视图编号、注释和依赖。没有修改定义的错误和跳过路径无需保存整库。PostgreSQL 的系统目录选项列和更复杂的可写视图仍有差距。`CAT-16`、`SQL-11`、`TXN-05`、`BACKUP-01` 保持部分实现。 [功能测试](test-report.md#alter-view-check-option-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-check-option-cost-20261126)
 
-对照还复现了早期写入路径上的问题。用 `CREATE VIEW totals AS SELECT count(*) AS total FROM base` 创建视图后，PostgreSQL 拒绝 `INSERT INTO totals VALUES (9)` 并返回 `55000`。上一版和本次构建都会把主键 `9` 写进底表。此问题继续列在 `CAT-16`、`DML-01`。
+这一版的对照发现，向 `COUNT(*)` 汇总视图插入的旧路径会误写底表。后续构建已修复这类写入。 [修复验证](test-report.md#read-only-view-writes-20261126)
 
 ## 2026-11-26 · 减少撤销更新时的数据写入
 

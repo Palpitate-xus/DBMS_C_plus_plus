@@ -90,6 +90,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DdlTransaction.h"
 #include "commands/DmlExecutor.h"
+#include "commands/ViewWriteShape.h"
 #include "commands/StoredRowNull.h"
 #include "catalog/CatalogService.h"
 #include "catalog/namespace_catalog.h"
@@ -5685,7 +5686,8 @@ static bool handlePrepare(const string& sql, const string& originalSql, Session&
             dbms::SQLParser parser;
             const auto parsed=parser.parseForBinding(templateSql);
             const bool rowCounts = hasDirectPreparedRowCount(parsed.stmt.get());
-            if (rowCounts || requiresParsedValueBinding(parsed.stmt.get())) {
+            const bool viewWrites = dbms::view_write::targetsView(s, parsed.stmt.get());
+            if (rowCounts || viewWrites || requiresParsedValueBinding(parsed.stmt.get())) {
                 vector<dbms::QueryBindingDatum> declarations;
                 for(size_t i=0;i<paramTypes.size();++i) {
                     dbms::QueryBindingDatum parameter;
@@ -5697,6 +5699,7 @@ static bool handlePrepare(const string& sql, const string& originalSql, Session&
                 // PREPARE analyzes declarations but never plans constants or
                 // evaluates argument values before publishing the name.
                 const auto prepared = g_engine.prepareBoundQuery(s.currentDB,templateSql,declarations);
+                if (viewWrites) dbms::view_write::validate(s, prepared);
                 if (rowCounts) {
                     dbms::ps_inferBoundParameterTypes(prepared, paramTypes);
                     for (size_t i = 0; i < paramTypes.size(); ++i) {
@@ -22850,7 +22853,8 @@ static bool handlePreparedDelete(const string& rawSql,Session& session,bool& han
     const auto* remove=parsed.isValid()?dynamic_cast<const dbms::DeleteStmt*>(parsed.stmt.get()):nullptr;
     // The bound mutation target is the named physical relation. ONLY does
     // not require legacy text lowering; that loses aliases/WHERE/RETURNING.
-    if(!remove || !remove->whereCurrentOf.empty())return false;
+    if(!remove || !remove->whereCurrentOf.empty() ||
+        dbms::view_write::targetsView(session, remove))return false;
     if(!checkDB(session)){handled=true;return true;}
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
     for(const auto& range:query->sourceRanges)
@@ -22872,7 +22876,8 @@ static bool handlePreparedSourceUpdate(const string& rawSql,Session& session,boo
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
     const auto* update=parsed.isValid()?dynamic_cast<const dbms::UpdateStmt*>(parsed.stmt.get()):nullptr;
-    if(!update || !update->fromClause || update->only || !update->whereCurrentOf.empty())return false;
+    if(!update || !update->fromClause || update->only || !update->whereCurrentOf.empty() ||
+        dbms::view_write::targetsView(session, update))return false;
     // DEFAULT remains at its existing target-metadata lowering boundary.
     // Do not bypass that owner or synthesize a replacement RHS here.
     for(const auto& assignment:update->setClauses) {
@@ -23859,18 +23864,21 @@ static bool handlePreparedWithDml(const string& rawSql,Session& session,bool& ha
         return false;
     }
     if (const auto* select = dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get())) {
-        if (any_of(select->ctes.begin(), select->ctes.end(), [](const auto& cte) {
+        const bool viewWrites = dbms::view_write::targetsView(session, select);
+        if (viewWrites || any_of(select->ctes.begin(), select->ctes.end(), [](const auto& cte) {
                 return cteMutationWithoutReturning(cte.query.get());
             })) {
             // The legacy reader executes WITH definitions before reading its
             // primary statement. Bind all references first, including those
             // in sibling definitions and branches that will return no rows.
-            (void)prepareWindowSourceQuery(session, rawSql);
+            const auto query = prepareWindowSourceQuery(session, rawSql);
+            if (viewWrites) dbms::view_write::validate(session, query);
         }
         return false;
     }
     if(!dynamic_cast<dbms::WithStmt*>(parsed.stmt.get()))return false;
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    dbms::view_write::validate(session, *query);
     PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.run();
     handled=true;
     if(!result.columns.empty()) {

@@ -15,6 +15,7 @@
 #include "common/SqlTrivia.h"
 #include "common/SqlSyntax.h"
 #include "commands/DmlExecutor.h"
+#include "commands/ViewWriteShape.h"
 #include "commands/CopyRelation.h"
 #include "executor/ExecutionPlan.h"
 #include "parser/BetweenSyntax.h"
@@ -4758,6 +4759,27 @@ bool describePreparedResultShape(const ProtocolQuerySyntax& syntax, Session& ses
         columns = {sessionSettingProtocolColumn(setting->projection)};
         return true;
     }
+    if (const auto* execute = dynamic_cast<const ExecuteStmt*>(syntax.parse().stmt.get())) {
+        const auto statement = session.preparedStmts.find(execute->name);
+        const auto types = session.preparedStmtParameterOids.find(execute->name);
+        if (statement != session.preparedStmts.end() && types != session.preparedStmtParameterOids.end()) {
+            const ProtocolQuerySyntax body(statement->second);
+            if (view_write::targetsView(session, body.parse().stmt.get()))
+                return describePreparedResultShape(body, session, columns, types->second);
+        }
+    }
+    if (const auto* with = dynamic_cast<const WithStmt*>(syntax.parse().stmt.get());
+        with && view_write::targetsView(session, with->statement.get())) {
+        const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql,
+            protocolMetadataParameters(session, parameterOids));
+        QueryResult shape;
+        for (const auto& field : prepared.output) {
+            shape.columns.push_back(field.name);
+            shape.columnTypes.push_back(field.type);
+        }
+        columns = describeProtocolColumns(shape, sql, session, &prepared.output);
+        return !columns.empty();
+    }
     if (describeMaintenanceProgress(syntax, columns)) return true;
     if (describePreparedWindowHostResult(syntax,session,columns,parameterOids)) return true;
     if(describePreparedMultirowExpression(syntax,session,columns,parameterOids))return true;
@@ -9301,7 +9323,9 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
             }
             size_t inferredParameterCount = 0;
             std::string parameterError;
-            if (!dbms::ps_analyzeDollarParams(
+            // A SQL PREPARE body's $n belong to the prepared SQL statement.
+            // The surrounding protocol statement has no Bind parameters.
+            if (SQLParser::classify(sql) != SqlCommand::Prepare && !dbms::ps_analyzeDollarParams(
                     sql, inferredParameterCount, parameterError)) {
                 sendExtendedProtocolError("42P02", parameterError);
                 extendedQueryError = true;
@@ -9354,6 +9378,11 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
                     resultIdentity.emplace();
                     resultIdentity->emplace_back(column.typeOid, column.typeModifier);
                 } else {
+                    if (view_write::targetsView(session, syntax.parse().stmt.get())) {
+                        const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql,
+                            protocolMetadataParameters(session, parameterTypes));
+                        view_write::validate(session, prepared);
+                    }
                     notePreparedTemporaryObjectAccess(sql, session);
                     // Catalog analysis belongs to Parse, before publishing a
                     // statement. Describe must never be its first validation.
@@ -9639,7 +9668,9 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
                 sendExtendedProtocolError(failure.sqlState(), failure.message());
                 continue;
             }
-            if (!dbms::ps_substituteDollarParams(
+            if (SQLParser::classify(preparedSql) == SqlCommand::Prepare) {
+                expandedSql = preparedSql;
+            } else if (!dbms::ps_substituteDollarParams(
                     lowerRowCounts ? loweredSql : preparedSql, literals, expandedSql, substitutionError)) {
                 sendExtendedProtocolError("42P02", substitutionError);
                 extendedQueryError = true;
