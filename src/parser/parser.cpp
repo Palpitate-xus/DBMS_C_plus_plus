@@ -12411,11 +12411,20 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 if (explicitColumn) ++pos;
                 if (!explicitColumn && pos < tokens.size() && toLower(tokens[pos]) == "to") {
                     ++pos;
-                    if (pos < tokens.size()) {
-                        sub.newName = parseRoutineIdentifier(tokens[pos++]);
-                    }
+                    const size_t nameIndex = pos;
+                    std::string spelling;
+                    if (!stmt->subCommands.empty() ||
+                        !parseQualifiedIdentifier(tokens, pos, spelling) ||
+                        pos != nameIndex + 1 ||
+                        (spelling.front() != '"' && identifierKeywordKind(toLower(spelling)) > 1))
+                        return nullptr;
+                    sub.newName = parseRoutineIdentifier(spelling);
+                    if (sub.newName.empty()) return nullptr;
+                    if (pos < tokens.size() && tokens[pos] == ";") ++pos;
+                    if (pos != tokens.size()) return nullptr;
                     sub.action = AlterTableStmt::Action::RenameTable;
-                    recognized = true;
+                    stmt->subCommands.push_back(std::move(sub));
+                    return stmt;
                 } else {
                     if (pos + 2 < tokens.size() && toLower(tokens[pos]) == "if" &&
                         toLower(tokens[pos + 1]) == "exists") { sub.ifExists = true; pos += 2; }

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>改表名时更快发现重名 · 2026-11-26</summary>
+
+在 ext4 测试盘上，库里多 32 张表时，改名遇到重名从约 2 秒缩短到约 40 毫秒。原表不存在时，可以用 `IF EXISTS` 跳过改名。
+
+[用法](docs/MANUAL.md#修改表) · [测试报告](docs/test-report.md#rename-name-checks-20261126) · [性能报告](docs/performance-report-2026-10-30.md#rename-name-checks-cost-20261126)
+
+</details>
+
+<details>
 <summary>磁盘上的表改名更快 · 2026-11-26</summary>
 
 在 ext4 测试盘上，额外有 128 张表时，改一张表名的耗时从约 3.6 秒降到约 1.8 秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>库里表多时，开始事务更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 库里表多时，开始事务更快
 
 在额外建了 512 张表的测试库里，开始事务从约 3 毫秒降到不到 1 毫秒。
 
 [测试报告](docs/test-report.md#relation-publication-20261126) · [性能报告](docs/performance-report-2026-10-30.md#relation-publication-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 库里列多时，按主键查一行更快
 

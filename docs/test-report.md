@@ -3,6 +3,15 @@
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
 
+<a id="rename-name-checks-20261126"></a>
+## 2026-11-26 · 改表名的错误、提示和回滚
+
+与 PostgreSQL 18.6 对照了 29 条 SQL，核对返回值、列类型、错误码、命令标签、协议消息顺序、事务状态和提示文本。原表不存在时优先报告原表缺失，模式不存在时返回 `3F000`，带 `IF EXISTS` 时返回提示。重名返回 `42P07`，多余参数、带模式的目标名或混入另一项表修改返回 `42601`。旧版曾把多余单词后的改名执行成功，源表缺失且目标名重名时也曾优先报告重名。错误消息中实现相关的文字和位置字段仍有差异。 [PostgreSQL ALTER TABLE](https://www.postgresql.org/docs/18/sql-altertable.html)
+
+程序面对一份无法写入物理备份的文件时，仍能正常返回缺失提示、重名错误和已有目标路径错误。有效的改名等到备份成功后才写入。模拟在随后移动文件后发布表名清单失败，或在同一位置强制终止进程，均恢复了旧表及原主键数据，并能重试。另验证显式保存点、带双引号的名称、`pg_temp` 临时表与同名永久表，以及临时表改名后继续使用它原有的自增序列。 [协议回归](../tests/alter_table_rename_preflight_protocol_e2e_test.py) · [冷启动回归](../tests/cold_start_transaction_backup_protocol_e2e_test.py)
+
+最终 CMake 程序 SHA-256 为 `66dc0a68518fa7268c431732338d3cc359f89018e22a769d0636e238a2aa2274`。13 个定向协议用例和 13 个 C++ 用例覆盖普通改名、外键、序列、回滚、表空间和重启。 [临时序列协议回归](../tests/temp_serial_owned_sequence_protocol_e2e_test.py) · [性能报告](performance-report-2026-10-30.md#rename-name-checks-cost-20261126)
+
 <a id="backup-file-sync-20261126"></a>
 ## 2026-11-26 · 备份同步失败和中途停机
 

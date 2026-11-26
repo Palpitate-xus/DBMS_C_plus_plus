@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 改名时检查原名和目标名
+
+PostgreSQL 支持 `ALTER TABLE IF EXISTS ... RENAME TO ...`，原表不存在时发出提示。SQLite 的改名语法更改同一个数据库内保存的表定义。DuckDB 也从目录层修改表名，视图引用需要另行处理。 [PostgreSQL ALTER TABLE](https://www.postgresql.org/docs/18/sql-altertable.html) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html) · [DuckDB ALTER TABLE](https://duckdb.org/docs/1.5/sql/statements/alter_table)
+
+项目普通表改名的原表缺失、缺少模式、重名和语法错误已经过对照。单条改名在写文件之前才备份，真正成功的改名仍使用整库备份保护回滚。PostgreSQL 允许用 `ALTER TABLE ... RENAME` 改部分其他关系对象的名字，本项目通过各对象的命令处理这些操作。 [功能测试](test-report.md#rename-name-checks-20261126) · [性能报告](performance-report-2026-10-30.md#rename-name-checks-cost-20261126)
+
 ## 2026-11-26 · 备份文件的同步
 
 PostgreSQL 的 `pg_basebackup` 从运行中的集群取备份并生成文件清单，默认在客户端逐个打开并同步文件。SQLite 的在线备份接口按数据库页复制。DuckDB 的 `CHECKPOINT` 将日志同步到数据库文件，`EXPORT DATABASE` 则导出定义和表数据。 [PostgreSQL pg_basebackup](https://www.postgresql.org/docs/18/app-pgbasebackup.html) · [SQLite 在线备份](https://www.sqlite.org/backup.html) · [DuckDB CHECKPOINT](https://duckdb.org/docs/1.5/sql/statements/checkpoint) · [DuckDB EXPORT DATABASE](https://duckdb.org/docs/1.5/sql/statements/export)

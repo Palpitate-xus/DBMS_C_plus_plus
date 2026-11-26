@@ -25241,7 +25241,8 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
 
 DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
                                                const std::string& oldName,
-                                               const std::string& newName) {
+                                               const std::string& newName,
+                                               const std::function<void()>& prepareUndo) {
     if (hasPartitionHeapWrites(dbname, oldName)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
@@ -25279,6 +25280,9 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         return DBStatus::IO_ERROR;
     }
 
+    // The name checks are read-only. An SQL caller can defer its backup
+    // until just before eviction, which can flush pending relation files.
+    if (prepareUndo) prepareUndo();
     TableSchema renamedSchema = getTableSchema(dbname, oldName);
     // Teardown can flush a fork, so evict before enumerating the files.
     // A plain table rename leaves the database and WAL directories in place.

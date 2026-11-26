@@ -2658,9 +2658,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
         [](const auto& sub) { return sub.action == AlterTableStmt::Action::Owner; });
     if (!ownerOnly && !checkAdmin(s)) return true;
 
-    const bool tableIsTemporary =
-        s.tempTables.count(stmt->tableName) != 0;
-    const std::string tableName = resolveTableName(s, stmt->tableName);
+    const bool standaloneRename = stmt->subCommands.size() == 1 &&
+        stmt->subCommands.front().action == AlterTableStmt::Action::RenameTable;
+    const bool deferRenameBackup = standaloneRename && !g_engine.inTransaction();
+    std::string tableName;
+    if (!standaloneRename) tableName = resolveTableName(s, stmt->tableName);
     std::string pendingTemporaryRename;
     std::set<std::string> droppedOwnedSequenceStorageNames;
 
@@ -2670,7 +2672,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     // later action failure restores the pre-statement database snapshot.
     DdlTransaction txn(s);
     txn.enableSnapshotRollback();
-    if (!txn.begin()) {
+    if (!txn.begin(deferRenameBackup ? DdlTransaction::SnapshotTiming::BeforeChange
+                                     : DdlTransaction::SnapshotTiming::AtBegin)) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
     }
@@ -2718,13 +2721,20 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
         }
     }
 
+    if (standaloneRename) tableName = resolveTableName(s, stmt->tableName);
+    CatalogManager::QualifiedName requestedName;
+    const bool tableIsTemporary = CatalogManager::parseQualifiedName(
+        stmt->tableName, requestedName) && s.tempTables.count(requestedName.name) != 0 &&
+        tableName == tempTablePrefix(s, requestedName.name);
+
     for (const auto& sub : stmt->subCommands) {
         // ADD COLUMN declaration conversion is pure. A rejected declaration
         // must not turn a clean snapshot into a database-wide physical
         // restore; successful earlier actions still keep the snapshot dirty.
         if (sub.action != AlterTableStmt::Action::AddColumn &&
             sub.action != AlterTableStmt::Action::DropColumn &&
-            sub.action != AlterTableStmt::Action::RenameColumn)
+            sub.action != AlterTableStmt::Action::RenameColumn &&
+            sub.action != AlterTableStmt::Action::RenameTable)
             txn.markSnapshotDirty();
         DBStatus status = DBStatus::OK;
         switch (sub.action) {
@@ -3107,38 +3117,77 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 break;
             case AlterTableStmt::Action::RenameTable: {
-                if (sub.newName.empty()) {
+                if (!standaloneRename || sub.newName.empty() || requestedName.name.empty()) {
                     std::cout << "SQL syntax error: RENAME TO requires a table name" << std::endl;
                     return true;
                 }
-                const auto qualifiedName =
-                    dbms::CatalogService::logicalName(tableName);
-                const auto schemaName = qualifiedName.schema.empty()
-                    ? "public" : qualifiedName.schema;
+                const auto qualifiedName = tableIsTemporary
+                    ? requestedName : dbms::CatalogService::logicalName(tableName);
+                const std::string schemaName = tableIsTemporary
+                    ? sessionTempSchemaName(s)
+                    : (qualifiedName.schema.empty() ? "public" : qualifiedName.schema);
                 std::vector<ViewRenamePlan> viewRenames;
-                if (sub.newName != qualifiedName.name) {
-                    try {
-                        dbms::CatalogManager& catalog =
-                            g_engine.catalogService().get(s.currentDB);
-                        if (catalog.resolveRelationSnapshot(sub.newName,
-                                                    {schemaName})) {
-                            std::cout << "ERROR: relation \"" << sub.newName
-                                      << "\" already exists (SQLSTATE 42P07)"
+                try {
+                    auto& catalog = g_engine.catalogService().get(s.currentDB);
+                    const auto nameSpace = catalog.getNamespaceByName(schemaName);
+                    const auto relationByName = [&](const std::string& name) {
+                        return nameSpace ? catalog.getClassByName(name, nameSpace->oid)
+                                         : std::nullopt;
+                    };
+                    const auto source = tableIsTemporary
+                        ? relationByName(requestedName.name)
+                        : catalog.resolveRelationSnapshot(
+                            stmt->tableName, effectiveRelationSearchPath(&s));
+                    if ((source && source->relkind != 'r' && source->relkind != 'p') ||
+                        g_engine.viewExists(s.currentDB, tableName)) {
+                        std::cout << "ERROR: ALTER TABLE RENAME requires a table (SQLSTATE 0A000)"
+                                  << std::endl;
+                        return true;
+                    }
+                    if (!g_engine.tableExists(s.currentDB, tableName)) {
+                        if (source) {
+                            std::cout << "ERROR: relation storage is missing (SQLSTATE 58030)"
                                       << std::endl;
                             return true;
                         }
-                        if (!tableIsTemporary)
-                            viewRenames = planViewSourceRename(catalog, s.currentDB,
-                                schemaName, qualifiedName.name, schemaName, sub.newName);
-                    } catch (const DbError& error) {
-                        std::cout << "ALTER TABLE RENAME: " << error.what()
-                                  << " (SQLSTATE " << error.sqlState() << ")" << std::endl;
-                        return true;
-                    } catch (const std::exception& error) {
-                        std::cout << "ALTER TABLE RENAME catalog lookup failed: "
-                                  << error.what() << std::endl;
+                        if (stmt->ifExists) {
+                            if (!txn.commit()) return true;
+                            emitNotice("relation \"" + requestedName.name +
+                                       "\" does not exist, skipping");
+                            std::cout << "ALTER TABLE succeeded" << std::endl;
+                            return false;
+                        }
+                        const bool ownTemporarySchema =
+                            requestedName.schema == "pg_temp" && s.tempNamespaceCreated;
+                        if (!requestedName.schema.empty() && !ownTemporarySchema &&
+                            !g_engine.schemaExists(s.currentDB, requestedName.schema)) {
+                            std::cout << "ERROR: schema \"" << requestedName.schema
+                                      << "\" does not exist (SQLSTATE 3F000)" << std::endl;
+                        } else {
+                            const auto missingName = requestedName.schema.empty()
+                                ? requestedName.name
+                                : requestedName.schema + "." + requestedName.name;
+                            std::cout << "ERROR: relation \"" << missingName
+                                      << "\" does not exist (SQLSTATE 42P01)" << std::endl;
+                        }
                         return true;
                     }
+                    if (relationByName(sub.newName)) {
+                        std::cout << "ERROR: relation \"" << sub.newName
+                                  << "\" already exists (SQLSTATE 42P07)" << std::endl;
+                        return true;
+                    }
+                    if (!tableIsTemporary && sub.newName != qualifiedName.name)
+                        viewRenames = planViewSourceRename(catalog, s.currentDB,
+                            schemaName, qualifiedName.name, schemaName, sub.newName);
+                } catch (const DbError& error) {
+                    std::cout << "ALTER TABLE RENAME: " << error.what()
+                              << " (SQLSTATE " << error.sqlState() << ")" << std::endl;
+                    return true;
+                } catch (const std::exception& error) {
+                    std::cout << "ALTER TABLE RENAME catalog lookup failed: "
+                              << error.what() << std::endl;
+                    return true;
                 }
                 const std::string physicalNewName = tableIsTemporary
                     ? tempTablePrefix(s, sub.newName)
@@ -3146,7 +3195,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                            ? sub.newName
                            : qualifiedName.schema + "__" + sub.newName);
                 status = g_engine.alterTableRenameTable(
-                    s.currentDB, tableName, physicalNewName);
+                    s.currentDB, tableName, physicalNewName, [&] {
+                        if (deferRenameBackup && !txn.enableSnapshotRollback())
+                            throw DbError("58030", "could not save files before renaming table");
+                        txn.markSnapshotDirty();
+                    });
                 if (status == DBStatus::TABLE_ALREADY_EXISTS) {
                     std::cout << "ERROR: relation \"" << sub.newName
                               << "\" already exists (SQLSTATE 42P07)"
@@ -3161,8 +3214,9 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     try {
                         dbms::CatalogManager& catalog =
                             g_engine.catalogService().get(s.currentDB);
-                        const auto relation = catalog.resolveRelationSnapshot(
-                            qualifiedName.name, {schemaName});
+                        const auto nameSpace = catalog.getNamespaceByName(schemaName);
+                        const auto relation = nameSpace ? catalog.getClassByName(
+                            qualifiedName.name, nameSpace->oid) : std::nullopt;
                         if (relation) {
                             const dbms::Oid relationOid = relation->oid;
                             if (!catalog.renameClass(relationOid, sub.newName)) {
@@ -4204,9 +4258,9 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     bool wasCreatedInTransaction = false;
     std::string onCommitAction;
     if (tableIsTemporary && !pendingTemporaryRename.empty()) {
-        s.tempTables.erase(stmt->tableName);
+        s.tempTables.erase(requestedName.name);
         s.tempTables.insert(pendingTemporaryRename);
-        const auto action = s.tempTableOnCommit.find(stmt->tableName);
+        const auto action = s.tempTableOnCommit.find(requestedName.name);
         if (action != s.tempTableOnCommit.end()) {
             hadOnCommitAction = true;
             onCommitAction = action->second;
@@ -4214,7 +4268,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
             s.tempTableOnCommit[pendingTemporaryRename] = onCommitAction;
         }
         wasCreatedInTransaction =
-            s.tempTablesCreatedInTransaction.erase(stmt->tableName) != 0;
+            s.tempTablesCreatedInTransaction.erase(requestedName.name) != 0;
         if (wasCreatedInTransaction) {
             s.tempTablesCreatedInTransaction.insert(pendingTemporaryRename);
         }
@@ -4223,14 +4277,14 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     if (!txn.commit()) {
         if (temporarySessionRenamed) {
             s.tempTables.erase(pendingTemporaryRename);
-            s.tempTables.insert(stmt->tableName);
+            s.tempTables.insert(requestedName.name);
             s.tempTableOnCommit.erase(pendingTemporaryRename);
             if (hadOnCommitAction) {
-                s.tempTableOnCommit[stmt->tableName] = onCommitAction;
+                s.tempTableOnCommit[requestedName.name] = onCommitAction;
             }
             s.tempTablesCreatedInTransaction.erase(pendingTemporaryRename);
             if (wasCreatedInTransaction) {
-                s.tempTablesCreatedInTransaction.insert(stmt->tableName);
+                s.tempTablesCreatedInTransaction.insert(requestedName.name);
             }
         }
         return true;

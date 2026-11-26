@@ -1,6 +1,10 @@
 # PostgreSQL 18 功能差距审计
 
 
+## 2026-11-26 · 表改名先检查名称
+
+普通表改名支持 `IF EXISTS`、源表和模式缺失诊断，以及通过 `pg_temp` 修改临时表名。单条语句在原名或目标路径检查失败时省去整库备份。真正改名以及已有显式事务的备份流程仍按原范围保护。其他关系类型、按表保存事务撤销内容和通用 `ALTER TABLE IF EXISTS` 仍有差距。`SQL-11`、`STO-02` 和 `TXN-05` 维持部分实现。 [测试报告](test-report.md#rename-name-checks-20261126) · [性能报告](performance-report-2026-10-30.md#rename-name-checks-cost-20261126)
+
 ## 2026-11-26 · 并行校验和同步备份文件
 
 同一份备份里的独立文件可以同时校验和同步。目录和清单在所有文件完成后才发布。写入失败保留旧备份，未发布的备份在重启时不作为数据库或恢复源。整库回滚备份、真正断电测试和在线备份期间继续写入仍有差距。`BACKUP-01`、`BACKUP-02` 和 `WAL-07` 维持部分实现。 [功能测试](test-report.md#backup-file-sync-20261126) · [性能报告](performance-report-2026-10-30.md#backup-file-sync-cost-20261126)
