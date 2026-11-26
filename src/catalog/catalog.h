@@ -3,6 +3,7 @@
 #include "oid.h"
 #include "systables.h"
 #include <memory>
+#include <functional>
 #include <map>
 #include <vector>
 #include <unordered_map>
@@ -375,6 +376,13 @@ public:
     std::vector<PgDescriptionRow> descriptionSnapshot(std::optional<Oid> object) const;
     static std::vector<PgDescriptionRow> readDescriptionSnapshot(const std::string& path,
         std::optional<Oid> object);
+    // A half-open range of object numbers. The exclusive end can be one
+    // past the maximum OID. A visitor runs with the model locked and must
+    // use only the supplied keys. With no visitor, return the range size.
+    using DescriptionKeyVisitor = std::function<void(Oid, Oid, int32_t)>;
+    size_t scanDescriptionKeys(uint64_t first, uint64_t end, const DescriptionKeyVisitor& visit) const;
+    static size_t readDescriptionKeys(const std::string& path, uint64_t first, uint64_t end,
+                                      const DescriptionKeyVisitor& visit);
 
     // 按对象类型 + 名称设置注释（支持 SCHEMA / TYPE / FUNCTION / PROCEDURE）
     bool setComment(const std::string& objType,
@@ -438,6 +446,10 @@ private:
     std::vector<PgAuthIdRow>     authIds_;
     std::vector<PgAuthMembersRow> authMembers_;
     std::vector<PgDescriptionRow> descriptions_;
+    using DescriptionOrder = std::vector<std::pair<Oid, size_t>>;
+    // The ordinal preserves file order within one object number, including
+    // imported rows with the same number in more than one object catalog.
+    mutable std::optional<DescriptionOrder> descriptionOrder_;
 
     // OID 索引: oid -> vector 下标
     std::unordered_map<Oid, size_t> nsByOid_;
@@ -495,6 +507,9 @@ private:
     const PgProcRow* findProcByNameUnlocked(const std::string& name, Oid nspOid) const;
     void setDescriptionUnlocked(Oid objoid, Oid classoid, int32_t objsubid,
                                 const std::string& description);
+    const DescriptionOrder& descriptionOrderUnlocked() const;
+    std::pair<DescriptionOrder::const_iterator, DescriptionOrder::const_iterator>
+        descriptionRangeUnlocked(uint64_t first, uint64_t end) const;
 };
 
 } // namespace dbms

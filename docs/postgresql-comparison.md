@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 按编号定位注释范围
+
+PostgreSQL 18.6 为 `pg_description` 建立了按对象编号、目录编号和列号排序的唯一 B-tree 索引。SQLite 的多列索引可利用开头的列定位记录。DuckDB 使用数据组的最小值和最大值跳过无匹配的组，也可以为部分等值查询使用 ART 索引。 [PostgreSQL 目录索引](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_description.h#L46-L64) · [SQLite 查询规划](https://www.sqlite.org/queryplanner.html#multicolumn) · [DuckDB 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)
+
+项目按内存中的对象编号定位范围，再统计当前可见的记录。两个连接的实测显示，PostgreSQL 在写入注释未提交时读到先前已提交的记录。项目的读请求在事务启动时等写入释放数据库级锁。PostgreSQL 在被注释对象上取得锁，SQLite 的 WAL 模式允许读旧快照，DuckDB 在同一进程内使用多版本并发控制。 [PostgreSQL COMMENT](https://www.postgresql.org/docs/18/sql-comment.html) · [PostgreSQL 事务隔离](https://www.postgresql.org/docs/18/transaction-iso.html) · [SQLite 事务隔离](https://www.sqlite.org/isolation.html) · [DuckDB 并发](https://duckdb.org/docs/1.5/connect/concurrency) · [本项目测试](test-report.md#description-range-20261126)
+
 ## 2026-11-26 · 直接统计注释记录
 
 PostgreSQL 可以从索引读取筛选所需的列，并根据该事务能看到的记录计数。SQLite 的精确计数可以在 B-tree 上完成。DuckDB 分批统计输入行，并可以将已确认不含空值的 `COUNT(列)` 转为 `COUNT(*)`。 [PostgreSQL 索引扫描](https://www.postgresql.org/docs/18/indexes-index-only-scans.html) · [SQLite Count 指令](https://www.sqlite.org/opcode.html#Count) · [DuckDB 计数实现](https://github.com/duckdb/duckdb/blob/v1.5.0/src/function/aggregate/distributive/count.cpp)

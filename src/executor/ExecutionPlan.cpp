@@ -5490,7 +5490,6 @@ namespace {
 struct DescriptionComparison {
     size_t column;
     StoredComparison operation;
-    bool reversed;
     int64_t constant;
 };
 
@@ -5514,7 +5513,7 @@ bool bindDescriptionPredicates(const Expr* expression, const PreparedQuery::Sour
         return bindDescriptionPredicates(binary->left.get(), range, predicates) &&
             bindDescriptionPredicates(binary->right.get(), range, predicates);
 
-    const auto operation = storedComparisons.find(binary->op);
+    auto operation = storedComparisons.find(binary->op);
     if (operation == storedComparisons.end()) return false;
     const auto* column = descriptionColumn(binary->left.get(), range);
     const bool reversed = !column;
@@ -5539,14 +5538,42 @@ bool bindDescriptionPredicates(const Expr* expression, const PreparedQuery::Sour
         }
     }
     if (!constant) return false;
-    predicates.push_back({column->columnOrdinal, operation->second, reversed, *constant});
+    if (reversed && (binary->op.front() == '<' || binary->op.front() == '>') && binary->op != "<>") {
+        auto reversedOp = binary->op;
+        reversedOp.front() = reversedOp.front() == '<' ? '>' : '<';
+        operation = storedComparisons.find(reversedOp);
+    }
+    predicates.push_back({column->columnOrdinal, operation->second, *constant});
     return true;
 }
+
+struct DescriptionObjectRange {
+    static constexpr uint64_t oidEnd = uint64_t{std::numeric_limits<Oid>::max()} + 1;
+    uint64_t first = 0;
+    uint64_t end = oidEnd;
+
+    bool apply(const DescriptionComparison& predicate) {
+        if (predicate.column != 0) return false;
+        const auto oid = static_cast<uint64_t>(predicate.constant);
+        switch (predicate.operation) {
+            case StoredComparison::Equal:
+                first = std::max(first, oid);
+                end = std::min(end, oid + 1);
+                return true;
+            case StoredComparison::Less: end = std::min(end, oid); return true;
+            case StoredComparison::LessEqual: end = std::min(end, oid + 1); return true;
+            case StoredComparison::Greater: first = std::max(first, oid + 1); return true;
+            case StoredComparison::GreaterEqual: first = std::max(first, oid); return true;
+            case StoredComparison::NotEqual: return false;
+        }
+        return false;
+    }
+};
 
 class DescriptionCountOp final : public Operator {
     StorageEngine& engine_;
     std::string database_;
-    std::optional<Oid> object_;
+    DescriptionObjectRange objects_;
     DescriptionPredicates where_;
     std::vector<DescriptionPredicates> filters_;
     std::shared_ptr<PreparedSelectState> state_;
@@ -5557,14 +5584,14 @@ class DescriptionCountOp final : public Operator {
         return std::all_of(predicates.begin(), predicates.end(), [&](const auto& predicate) {
             const auto key = keys[predicate.column];
             const auto order = (key > predicate.constant) - (key < predicate.constant);
-            return matchesStoredComparison(predicate.operation, predicate.reversed ? -order : order);
+            return matchesStoredComparison(predicate.operation, order);
         });
     }
 
 public:
-    DescriptionCountOp(StorageEngine& engine, const std::string& database, std::optional<Oid> object,
+    DescriptionCountOp(StorageEngine& engine, const std::string& database, DescriptionObjectRange objects,
                        DescriptionPredicates where, std::vector<DescriptionPredicates> filters)
-        : engine_(engine), database_(database), object_(object), where_(std::move(where)),
+        : engine_(engine), database_(database), objects_(objects), where_(std::move(where)),
           filters_(std::move(filters)) {}
 
     void bindOutput(std::shared_ptr<PreparedSelectState> state) {
@@ -5584,22 +5611,23 @@ public:
         NextInstrument instrument(this);
         if (emitted_) return false;
         checkForQueryInterrupt();
-        const auto rows = engine_.catalogService().descriptionSnapshot(database_, object_);
+        const auto& service = static_cast<const StorageEngine&>(engine_).catalogService();
         std::vector<int64_t> counts(filters_.size(), 0);
-        if (where_.empty() && std::all_of(filters_.begin(), filters_.end(), [](const auto& filter) {
-                return filter.empty();
-            })) {
-            if (rows.size() > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+        const bool countRange = where_.empty() && std::all_of(filters_.begin(), filters_.end(),
+            [](const auto& filter) { return filter.empty(); });
+        CatalogManager::DescriptionKeyVisitor visit;
+        if (!countRange) visit = [&](Oid object, Oid catalog, int32_t column) {
+            checkForQueryInterrupt();
+            const std::array<int64_t, 3> keys{object, catalog, column};
+            if (!matches(where_, keys)) return;
+            for (size_t i = 0; i < counts.size(); ++i)
+                if (matches(filters_[i], keys)) incrementAggregateCount(counts[i]);
+        };
+        const auto rows = service.scanDescriptionKeys(database_, objects_.first, objects_.end, visit);
+        if (countRange) {
+            if (rows > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
                 throw DbError("22003", "bigint out of range");
-            std::fill(counts.begin(), counts.end(), static_cast<int64_t>(rows.size()));
-        } else {
-            for (const auto& row : rows) {
-                checkForQueryInterrupt();
-                const std::array<int64_t, 3> keys{row.objoid, row.classoid, row.objsubid};
-                if (!matches(where_, keys)) continue;
-                for (size_t i = 0; i < counts.size(); ++i)
-                    if (matches(filters_[i], keys)) incrementAggregateCount(counts[i]);
-            }
+            std::fill(counts.begin(), counts.end(), static_cast<int64_t>(rows));
         }
         result_ = state_->execution->context(state_->outerRow);
         for (size_t i = 0; i < counts.size(); ++i) {
@@ -5624,7 +5652,12 @@ public:
     std::string preparedPlanNodeName() const override { return "Catalog Count"; }
     std::map<std::string, std::string> preparedPlanAttributes() const override {
         auto attributes = std::map<std::string, std::string>{{"relation", description_catalog::name}};
-        if (object_) attributes.emplace("objectOid", std::to_string(*object_));
+        if (objects_.end == objects_.first + 1) {
+            attributes.emplace("objectOid", std::to_string(objects_.first));
+        } else if (objects_.first || objects_.end != DescriptionObjectRange::oidEnd) {
+            attributes.emplace("objectFrom", std::to_string(objects_.first));
+            attributes.emplace("objectEnd", std::to_string(objects_.end));
+        }
         return attributes;
     }
 };
@@ -5656,7 +5689,11 @@ OpPtr description_catalog::makeCountSource(StorageEngine& engine, const std::str
         auto& filter = filters.emplace_back();
         if (call.filter && !bindDescriptionPredicates(call.filter.get(), range, filter)) return {};
     }
-    return std::make_unique<DescriptionCountOp>(engine, database, objectFilter(range),
+    DescriptionObjectRange objects;
+    where.erase(std::remove_if(where.begin(), where.end(), [&](const auto& predicate) {
+        return objects.apply(predicate);
+    }), where.end());
+    return std::make_unique<DescriptionCountOp>(engine, database, objects,
         std::move(where), std::move(filters));
 }
 

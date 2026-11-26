@@ -902,6 +902,15 @@ std::vector<PgDescriptionRow> CatalogService::descriptionSnapshot(const std::str
     return CatalogManager::readDescriptionSnapshot(catalog.path, object);
 }
 
+size_t CatalogService::scanDescriptionKeys(const std::string& dbname, uint64_t first, uint64_t end,
+                                           const CatalogManager::DescriptionKeyVisitor& visit) const {
+    const auto ownership = engine_.catalogReadOwnership(dbname);
+    const auto catalog = readCatalog(dbname, ownership.mayReadCurrentFiles);
+    if (catalog.manager) return catalog.manager->scanDescriptionKeys(first, end, visit);
+    if (catalog.path.empty()) return 0;
+    return CatalogManager::readDescriptionKeys(catalog.path, first, end, visit);
+}
+
 std::pair<Oid, std::string> CatalogService::resolveRegclass(const std::string& database,
     std::optional<Oid> oid, const std::string& input, const Session* session, bool textInput) const {
     const auto ownership = database.empty() ? StorageEngine::CatalogReadOwnership{}

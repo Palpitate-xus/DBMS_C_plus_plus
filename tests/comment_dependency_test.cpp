@@ -8,6 +8,7 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <string>
 
 extern dbms::StorageEngine g_engine;
@@ -110,6 +111,35 @@ int main() {
         assert(catalog.getDescription(
                    int4->oid, dbms::PgClassOid_Type, 0) ==
                "integer comment");
+
+        const auto before = catalog.descriptionSnapshot(tableOid);
+        assert(before.size() == 2);
+        const uint64_t pastTable = uint64_t{tableOid} + 1;
+        assert(catalog.scanDescriptionKeys(tableOid, pastTable, {}) == 2);
+        assert(catalog.scanDescriptionKeys(pastTable, tableOid, {}) == 0);
+
+        // A catalog name disambiguates identical object numbers. Unqualified
+        // lookups and filtered snapshots retain the former file order.
+        catalog.setDescription(tableOid, dbms::PgClassOid_Type, 0, "same number");
+        assert(catalog.description(tableOid, 0, {}) == "table comment");
+        assert(catalog.description(tableOid, 0, "pg_type") == "same number");
+        assert(catalog.descriptionSnapshot(tableOid).back().description == "same number");
+        assert(catalog.removeDescription(tableOid, dbms::PgClassOid_Type, 0));
+        assert(catalog.scanDescriptionKeys(tableOid, pastTable, {}) == 2);
+
+        constexpr auto maxOid = std::numeric_limits<dbms::Oid>::max();
+        constexpr uint64_t pastMax = uint64_t{maxOid} + 1;
+        catalog.setDescription(maxOid, dbms::PgClassOid_Class, 0, "high number");
+        catalog.setDescription(maxOid, dbms::PgClassOid_Class, 0, "updated high number");
+        assert(catalog.descriptionSnapshot(maxOid).front().description == "updated high number");
+        int visited = 0;
+        assert(catalog.scanDescriptionKeys(maxOid, pastMax, [&](dbms::Oid oid, dbms::Oid type, int32_t column) {
+            assert(oid == maxOid && type == dbms::PgClassOid_Class && column == 0);
+            ++visited;
+        }) == 1);
+        assert(visited == 1);
+        assert(catalog.removeDescription(maxOid, dbms::PgClassOid_Class, 0));
+        assert(catalog.scanDescriptionKeys(maxOid, pastMax, {}) == 0);
     }
 
     assert(g_engine.beginTransaction(database) == dbms::DBStatus::OK);

@@ -82,6 +82,17 @@ def check_counts(client, wire, table, reference):
     wire.query(f'SELECT count(*) AS n FROM {source} WHERE {scope} AND 1 / d.objsubid > 0',
                state='22012', tag=None)
 
+    for predicate, expected in (
+        (f'{table} <= d.objoid AND d.objoid < {table + 1}', '2'),
+        (f'd.objoid > {table - 1} AND {table} >= d.objoid', '2'),
+        (f'd.objoid < {table} AND {table} <= d.objoid', '0'),
+        (f'd.objoid = {table} AND d.objoid <> {table}', '0'),
+        ('d.objoid > 4294967295', '0'),
+        ('d.objoid < 0', '0'),
+    ):
+        wire.query(f'SELECT count(*) AS n FROM {source} WHERE {predicate}',
+                   rows=[(expected,)], fields=[('n', 20)])
+
     for analyze in ('', 'ANALYZE, TIMING OFF, '):
         statement = f'EXPLAIN ({analyze}COSTS OFF) {sql}'
         frames = wire.send_statements(statement)
@@ -94,6 +105,15 @@ def check_counts(client, wire, table, reference):
             assert 'pg_description' in counts[0] and 'Catalog Scan' not in '\n'.join(lines), lines
         if analyze:
             assert re.search(r'actual rows=1(?:\.\d+)? ', counts[0]), lines
+
+    sql = ('EXPLAIN (COSTS OFF) SELECT count(*) '
+           f'FROM {source} WHERE d.objoid >= {table} AND d.objoid < {table + 2}')
+    frames = wire.send_statements(sql)
+    lines = [row[0].decode() for row in client.data_row_values(frames)]
+    wire.check(sql, frames, rows=[(line,) for line in lines], tag='EXPLAIN', fields=[('QUERY PLAN', 25)])
+    if not reference:
+        assert any('Catalog Count' in line and f'objectFrom={table}' in line and
+                   f'objectEnd={table + 2}' in line for line in lines), lines
 
 
 def check(client, sock, reference):

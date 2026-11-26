@@ -74,6 +74,8 @@ public:
         int32_t subobject, std::optional<std::string_view> catalogName) const;
     std::vector<PgDescriptionRow> descriptionSnapshot(const std::string& dbname,
         std::optional<Oid> object = std::nullopt) const;
+    size_t scanDescriptionKeys(const std::string& dbname, uint64_t first, uint64_t end,
+                               const CatalogManager::DescriptionKeyVisitor& visit) const;
     std::pair<Oid, std::string> resolveRegclass(const std::string& database, std::optional<Oid> oid,
         const std::string& input, const Session* session, bool textInput = false) const;
     std::optional<bool> relationIsVisible(const std::string& dbname, Oid oid,

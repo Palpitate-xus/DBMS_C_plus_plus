@@ -1565,6 +1565,7 @@ bool CatalogManager::remapColumnMetadataAfterDrop(
 
     depends_ = std::move(remappedDependencies);
     descriptions_ = std::move(remappedDescriptions);
+    descriptionOrder_.reset();
     attrdefs_.swap(remappedDefaults);
     for (Oid id : removedDefaults) if (oidGen_) oidGen_->deallocate(id);
     return true;
@@ -2230,14 +2231,14 @@ void CatalogManager::removeDependRecordsUnlocked(Oid classid, Oid objid) {
     // pg_description rows are addressed by the same ObjectAddress as the
     // object they describe.  They are not independent dependents, so every
     // object-drop path must remove them together with pg_depend metadata.
-    descriptions_.erase(
-        std::remove_if(
-            descriptions_.begin(), descriptions_.end(),
-            [classid, objid](const PgDescriptionRow& description) {
-                return description.classoid == classid &&
-                       description.objoid == objid;
-            }),
-        descriptions_.end());
+    const auto first = std::remove_if(descriptions_.begin(), descriptions_.end(),
+        [classid, objid](const PgDescriptionRow& description) {
+            return description.classoid == classid && description.objoid == objid;
+        });
+    if (first != descriptions_.end()) {
+        descriptions_.erase(first, descriptions_.end());
+        descriptionOrder_.reset();
+    }
 }
 
 bool CatalogManager::removeDepend(Oid classid, Oid objid, int32_t objsubid,
@@ -2260,20 +2261,39 @@ bool CatalogManager::removeDepend(Oid classid, Oid objid, int32_t objsubid,
 // pg_description — COMMENT ON
 // ============================================================================
 
+const CatalogManager::DescriptionOrder& CatalogManager::descriptionOrderUnlocked() const {
+    if (!descriptionOrder_) {
+        DescriptionOrder order;
+        order.reserve(descriptions_.size());
+        for (size_t i = 0; i < descriptions_.size(); ++i) order.emplace_back(descriptions_[i].objoid, i);
+        std::sort(order.begin(), order.end());
+        descriptionOrder_.emplace(std::move(order));
+    }
+    return *descriptionOrder_;
+}
+
+std::pair<CatalogManager::DescriptionOrder::const_iterator, CatalogManager::DescriptionOrder::const_iterator>
+CatalogManager::descriptionRangeUnlocked(uint64_t first, uint64_t end) const {
+    const auto& ordered = descriptionOrderUnlocked();
+    const auto before = [](const auto& entry, uint64_t oid) { return entry.first < oid; };
+    const auto start = std::lower_bound(ordered.begin(), ordered.end(), first, before);
+    return {start, std::lower_bound(start, ordered.end(), end, before)};
+}
+
 void CatalogManager::setDescriptionUnlocked(Oid objoid, Oid classoid, int32_t objsubid,
                                             const std::string& description) {
-    for (auto& d : descriptions_) {
-        if (d.objoid == objoid && d.classoid == classoid && d.objsubid == objsubid) {
-            d.description = description;
+    const auto [first, end] = descriptionRangeUnlocked(objoid, uint64_t{objoid} + 1);
+    for (auto member = first; member != end; ++member) {
+        auto& old = descriptions_[member->second];
+        if (old.classoid == classoid && old.objsubid == objsubid) {
+            old.description = description;
             return;
         }
     }
-    PgDescriptionRow r;
-    r.objoid = objoid;
-    r.classoid = classoid;
-    r.objsubid = objsubid;
-    r.description = description;
-    descriptions_.push_back(r);
+    auto& ordered = *descriptionOrder_;
+    const auto inserted = ordered.emplace(end, objoid, descriptions_.size());
+    try { descriptions_.push_back({objoid, classoid, objsubid, description}); }
+    catch (...) { ordered.erase(inserted); throw; }
 }
 
 void CatalogManager::setDescription(Oid objoid, Oid classoid, int32_t objsubid,
@@ -2284,8 +2304,10 @@ void CatalogManager::setDescription(Oid objoid, Oid classoid, int32_t objsubid,
 
 std::string CatalogManager::getDescription(Oid objoid, Oid classoid, int32_t objsubid) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& d : descriptions_) {
-        if (d.objoid == objoid && d.classoid == classoid && d.objsubid == objsubid) {
+    const auto [first, end] = descriptionRangeUnlocked(objoid, uint64_t{objoid} + 1);
+    for (auto member = first; member != end; ++member) {
+        const auto& d = descriptions_[member->second];
+        if (d.classoid == classoid && d.objsubid == objsubid) {
             return d.description;
         }
     }
@@ -2308,11 +2330,12 @@ std::optional<std::string> CatalogManager::description(Oid object, int32_t subob
             classOid = classes_[found->second].oid;
         }
     }
-    const auto row = std::find_if(descriptions_.begin(), descriptions_.end(), [&](const auto& entry) {
-        return entry.objoid == object && entry.objsubid == subobject &&
-               (!classOid || entry.classoid == *classOid);
-    });
-    return row == descriptions_.end() ? std::nullopt : std::make_optional(row->description);
+    const auto [first, end] = descriptionRangeUnlocked(object, uint64_t{object} + 1);
+    for (auto member = first; member != end; ++member) {
+        const auto& row = descriptions_[member->second];
+        if (row.objsubid == subobject && (!classOid || row.classoid == *classOid)) return row.description;
+    }
+    return std::nullopt;
 }
 
 std::optional<std::string> CatalogManager::readDescription(const std::string& path, Oid object,
@@ -2324,8 +2347,10 @@ std::optional<std::string> CatalogManager::readDescription(const std::string& pa
 std::vector<PgDescriptionRow> CatalogManager::descriptionSnapshot(std::optional<Oid> object) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!object) return descriptions_;
+    const auto [first, end] = descriptionRangeUnlocked(*object, uint64_t{*object} + 1);
     std::vector<PgDescriptionRow> rows;
-    for (const auto& row : descriptions_) if (row.objoid == *object) rows.push_back(row);
+    rows.reserve(static_cast<size_t>(end - first));
+    for (auto member = first; member != end; ++member) rows.push_back(descriptions_[member->second]);
     return rows;
 }
 
@@ -2333,6 +2358,26 @@ std::vector<PgDescriptionRow> CatalogManager::readDescriptionSnapshot(const std:
     std::optional<Oid> object) {
     CatalogManager catalog(path, ReadOnlyTag{});
     return catalog.descriptionSnapshot(object);
+}
+
+size_t CatalogManager::scanDescriptionKeys(uint64_t first, uint64_t end,
+                                           const DescriptionKeyVisitor& visit) const {
+    if (first >= end) return 0;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto offer = [&](const PgDescriptionRow& row) { visit(row.objoid, row.classoid, row.objsubid); };
+    if (first == 0 && end > std::numeric_limits<Oid>::max()) {
+        if (visit) for (const auto& row : descriptions_) offer(row);
+        return descriptions_.size();
+    }
+    const auto [begin, finish] = descriptionRangeUnlocked(first, end);
+    if (visit) for (auto member = begin; member != finish; ++member) offer(descriptions_[member->second]);
+    return static_cast<size_t>(finish - begin);
+}
+
+size_t CatalogManager::readDescriptionKeys(const std::string& path, uint64_t first, uint64_t end,
+                                           const DescriptionKeyVisitor& visit) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.scanDescriptionKeys(first, end, visit);
 }
 
 bool CatalogManager::removeDescription(Oid objoid, Oid classoid, int32_t objsubid) {
@@ -2344,6 +2389,7 @@ bool CatalogManager::removeDescription(Oid objoid, Oid classoid, int32_t objsubi
                              });
     if (it == descriptions_.end()) return false;
     descriptions_.erase(it, descriptions_.end());
+    descriptionOrder_.reset();
     return true;
 }
 
@@ -3482,7 +3528,8 @@ void CatalogManager::loadAllLocked() {
     auto priorIndexes = std::make_tuple(
         std::move(nsByOid_), std::move(classByOid_), std::move(typeByOid_),
         std::move(procByOid_), std::move(authIdByOid_), std::move(authMemberByOid_),
-        std::move(nsByName_), std::move(authIdByName_), std::move(classByName_));
+        std::move(nsByName_), std::move(authIdByName_), std::move(classByName_), std::move(descriptionOrder_));
+    descriptionOrder_.reset();
     try {
     namespaces_.clear(); classes_.clear(); attributes_.clear(); types_.clear();
     enums_.clear(); procs_.clear(); depends_.clear(); authIds_.clear();
@@ -4054,7 +4101,7 @@ void CatalogManager::loadAllLocked() {
         std::tie(namespaces_, classes_, attributes_, types_, enums_, procs_,
                  depends_, authIds_, authMembers_, descriptions_, attrdefs_, foreignKeys_, primaryKeys_) = std::move(priorRows);
         std::tie(nsByOid_, classByOid_, typeByOid_, procByOid_, authIdByOid_,
-                 authMemberByOid_, nsByName_, authIdByName_, classByName_) =
+                 authMemberByOid_, nsByName_, authIdByName_, classByName_, descriptionOrder_) =
             std::move(priorIndexes);
         throw;
     }

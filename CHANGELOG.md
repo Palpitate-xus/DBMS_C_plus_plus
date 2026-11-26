@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按编号统计注释时少读数据 · 2026-11-26</summary>
+
+统计一段编号内的注释时，数据库可以直接找到这一段记录。额外写入 4,096 条列注释的测试中，整条查询从约 24.8 毫秒缩短到约 24.2 毫秒。
+
+[测试报告](docs/test-report.md#description-range-20261126) · [性能报告](docs/performance-report-2026-10-30.md#description-range-cost-20261126)
+
+</details>
+
+<details>
 <summary>同时统计表和列的注释更快 · 2026-11-26</summary>
 
 在额外写入 1,024 条列注释的测试库里，一次查询分别统计表注释、列注释和总数，用时从约 50 毫秒缩短到约 7.7 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以查看数据库怎样查找注释 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 可以查看数据库怎样查找注释
 
 想知道数据库怎样查找表或列的注释，可以在查询前加上 `EXPLAIN` 查看步骤。
 
 [使用说明](docs/MANUAL.md#查看对象注释) · [测试报告](docs/test-report.md#description-relation-20261126) · [性能报告](docs/performance-report-2026-10-30.md#description-relation-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 修改注释所需的临时备份更小
 
