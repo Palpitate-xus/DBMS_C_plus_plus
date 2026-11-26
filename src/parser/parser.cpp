@@ -12285,14 +12285,16 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
         } else if (kw == "drop" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "column") {
             recognized = true;
             sub.action = AlterTableStmt::Action::DropColumn; pos += 2;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "if") {
+            if (match(tokens, pos, "if")) {
+                if (!match(tokens, pos + 1, "exists")) return nullptr;
                 sub.ifExists = true;
-                pos += 3; // IF EXISTS
+                pos += 2;
             }
             if (pos < tokens.size()) {
                 sub.name = parseRoutineIdentifier(tokens[pos++]);
             }
             if (pos < tokens.size() && toLower(tokens[pos]) == "cascade") { sub.options["cascade"] = "true"; ++pos; }
+            else if (match(tokens, pos, "restrict")) ++pos;
         } else if (kw == "drop") {
             recognized = true;
             sub.action = AlterTableStmt::Action::DropConstraint; ++pos;
@@ -12303,6 +12305,7 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             }
             if (pos < tokens.size()) sub.name = parseRoutineIdentifier(tokens[pos++]);
             if (pos < tokens.size() && toLower(tokens[pos]) == "cascade") { sub.options["cascade"] = "true"; ++pos; }
+            else if (match(tokens, pos, "restrict")) ++pos;
         } else if (kw == "alter" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "column") {
             recognized = true;
             sub.action = AlterTableStmt::Action::AlterColumn; pos += 2;
@@ -12315,6 +12318,7 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                     ++pos;
                     sub.defaultValue = parseSimpleExpr(tokens, pos);
                 } else if (pos < tokens.size() && toLower(tokens[pos]) == "not") {
+                    if (!match(tokens, pos + 1, "null")) return nullptr;
                     pos += 2; // NOT NULL
                     sub.setNotNull = true;
                 } else if (pos < tokens.size() && toLower(tokens[pos]) == "data") {
@@ -12339,7 +12343,11 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             } else if (pos < tokens.size() && toLower(tokens[pos]) == "drop") {
                 ++pos;
                 if (pos < tokens.size() && toLower(tokens[pos]) == "default") { sub.dropDefault = true; ++pos; }
-                else if (pos < tokens.size() && toLower(tokens[pos]) == "not") { sub.dropNotNull = true; pos += 2; }
+                else if (pos < tokens.size() && toLower(tokens[pos]) == "not") {
+                    if (!match(tokens, pos + 1, "null")) return nullptr;
+                    sub.dropNotNull = true;
+                    pos += 2;
+                }
                 else if (pos < tokens.size() &&
                          toLower(tokens[pos]) == "identity") {
                     ++pos;
@@ -12616,8 +12624,45 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             if (pos < tokens.size() && toLower(tokens[pos]) == "to") ++pos;
             if (pos < tokens.size()) sub.newName = tokens[pos++];
         } else {
+            if (stmt->ifExists) return nullptr;
             // Unknown subcommand; skip to next comma or semicolon
             while (pos < tokens.size() && tokens[pos] != ";" && tokens[pos] != ",") ++pos;
+        }
+        if (stmt->ifExists) {
+            if (!recognized || (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ";"))
+                return nullptr;
+            using Action = AlterTableStmt::Action;
+            switch (sub.action) {
+                case Action::AddColumn:
+                    if (sub.colDef.name.empty() || sub.colDef.typeName.empty()) return nullptr;
+                    break;
+                case Action::AlterColumn:
+                    if (sub.name.empty() || (!sub.defaultValue && !sub.dropDefault &&
+                        !sub.setNotNull && !sub.dropNotNull &&
+                        sub.dataType.empty() && sub.identityAction.empty()))
+                        return nullptr;
+                    break;
+                case Action::DropColumn: case Action::DropConstraint:
+                case Action::ValidateConstraint: case Action::ClusterOn:
+                case Action::EnableTrigger: case Action::DisableTrigger:
+                case Action::AttachPartition: case Action::DetachPartition:
+                    if (sub.name.empty() || sub.name == ";") return nullptr;
+                    break;
+                case Action::RenameColumn: case Action::RenameConstraint:
+                    if (sub.name.empty() || sub.newName.empty()) return nullptr;
+                    break;
+                case Action::AddConstraint:
+                    if (sub.constraint.type.empty()) return nullptr;
+                    break;
+                case Action::Owner: case Action::SetTablespace:
+                    if (sub.newName.empty() || sub.newName == ";") return nullptr;
+                    break;
+                default:
+                    break;
+            }
+            if (pos < tokens.size() && tokens[pos] == "," &&
+                (pos + 1 >= tokens.size() || tokens[pos + 1] == ";"))
+                return nullptr;
         }
         if (recognized) {
             stmt->subCommands.push_back(std::move(sub));

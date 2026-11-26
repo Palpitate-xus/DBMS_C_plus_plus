@@ -7,6 +7,10 @@
 截至 2026-11-26，273 项功能要求中有 22 项完成、170 项部分实现、66 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
 
+## 2026-11-26 · 修改表时跳过不存在的表
+
+普通表已支持的修改动作可以用 `ALTER TABLE IF EXISTS` 跳过不存在的表。显式事务里的跳过操作直接返回提示，重名改表也在写入前拒绝。实际改动需要恢复时，数据库仍会保存整库备份；同一事务里后续改名会保存该语句自己的恢复点。 [用法](MANUAL.md#修改表) · [功能测试](test-report.md#alter-if-exists-20261126) · [性能报告](performance-report-2026-10-30.md#alter-if-exists-cost-20261126)
+
 ## 2026-11-26 · 改表名先检查原名和新名
 
 单独执行表改名时，先检查原表和新名字，再为文件改动建立回滚备份。原表不存在可用 `IF EXISTS` 跳过，重名或语法错误会尽早返回。带 `pg_temp` 的临时表改名继续保留原有自增序列。 [用法](MANUAL.md#修改表) · [功能测试](test-report.md#rename-name-checks-20261126) · [性能报告](performance-report-2026-10-30.md#rename-name-checks-cost-20261126)

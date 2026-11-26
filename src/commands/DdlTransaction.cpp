@@ -132,27 +132,31 @@ void DdlTransaction::markSnapshotDirty() {
     engine_.markTransactionBackupDirty();
 }
 
+bool DdlTransaction::prepareSnapshot() {
+    if (!active_ || !snapshotRollbackEnabled_ || !engine_.inTransaction()) return false;
+    // An outer transaction's first image is reserved for full rollback.
+    // A later statement can restore its own image without undoing earlier DDL.
+    if (!startedByUs_ && engine_.transactionBackupDirty())
+        return !statementBackupPath_.empty() ||
+               engine_.createDdlStatementBackup(statementBackupPath_);
+    return enableSnapshotRollback();
+}
+
 bool DdlTransaction::begin(SnapshotTiming timing) {
     const bool deferSnapshot = timing == SnapshotTiming::BeforeChange;
     if (deferSnapshot && (!snapshotRollbackEnabled_ || database_.empty())) return false;
     if (engine_.inTransaction()) {
-        if (deferSnapshot || engine_.transactionDatabase() != database_) return false;
-        if (snapshotRollbackEnabled_ && engine_.transactionBackupDirty()) {
-            // Keep the transaction's original image reserved for full
-            // ROLLBACK. A later file-rewriting statement gets an auxiliary
-            // image so its failure does not erase earlier successful DDL.
-            active_ = true;
-            startedByUs_ = false;
-            if (!engine_.createDdlStatementBackup(statementBackupPath_)) {
-                active_ = false;
-                return false;
-            }
-            return true;
-        }
+        if (engine_.transactionDatabase() != database_) return false;
         active_ = true;
         startedByUs_ = false;
         try {
-            if (snapshotRollbackEnabled_ && !enableSnapshotRollback()) {
+            if (deferSnapshot) {
+                const auto status = engine_.ensureDatabaseTransactionOwnership(database_);
+                if (status != DBStatus::OK)
+                    throw DbError(sqlstateForDBStatus(status),
+                                  "could not acquire database transaction ownership");
+                engine_.lockDatabaseForDdl();
+            } else if (snapshotRollbackEnabled_ && !prepareSnapshot()) {
                 active_ = false;
                 return false;
             }

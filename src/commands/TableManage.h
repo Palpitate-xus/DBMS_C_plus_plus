@@ -2454,6 +2454,7 @@ public:
 private:
     // Copy a physical generation after the caller has acquired the database
     // transaction lock and flushed all durable state.
+    friend class DdlTransaction;
     void lockDatabaseForDdl();
     bool recordCreateTableUndo(const std::string& dbname, const TableSchema& table);
     bool ensureCreateUndoImage(const std::string& dbname, bool commentsOnly = false);

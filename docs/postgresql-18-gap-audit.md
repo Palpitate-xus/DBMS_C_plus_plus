@@ -1,6 +1,10 @@
 # PostgreSQL 18 功能差距审计
 
 
+## 2026-11-26 · 普通表修改的缺表检查
+
+`ALTER TABLE IF EXISTS` 对已支持的普通表修改返回缺表提示，显式事务内的跳过操作保留既有事务状态。实际表改名延后到写入前才保存整库备份，后续改名失败可恢复到语句开始前。更完整的语法、其他关系类型和按表恢复仍有差距。`SQL-11`、`TXN-05` 和 `WAL-05` 维持部分实现。 [功能测试](test-report.md#alter-if-exists-20261126) · [性能报告](performance-report-2026-10-30.md#alter-if-exists-cost-20261126)
+
 ## 2026-11-26 · 表改名先检查名称
 
 普通表改名支持 `IF EXISTS`、源表和模式缺失诊断，以及通过 `pg_temp` 修改临时表名。单条语句在原名或目标路径检查失败时省去整库备份。真正改名以及已有显式事务的备份流程仍按原范围保护。其他关系类型、按表保存事务撤销内容和通用 `ALTER TABLE IF EXISTS` 仍有差距。`SQL-11`、`STO-02` 和 `TXN-05` 维持部分实现。 [测试报告](test-report.md#rename-name-checks-20261126) · [性能报告](performance-report-2026-10-30.md#rename-name-checks-cost-20261126)

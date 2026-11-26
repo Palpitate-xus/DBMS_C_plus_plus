@@ -1106,6 +1106,8 @@ WHERE objoid = 'shop.orders'::regclass::oid AND classoid = 1259;
 
 ### 修改表
 
+用 `ALTER TABLE IF EXISTS shop.orders ADD COLUMN archived boolean` 加列时，如果 `orders` 不存在，数据库会发出提示并跳过。删列时也可以用 `ALTER TABLE shop.orders DROP COLUMN IF EXISTS archived` 跳过不存在的列。 [修改表测试](test-report.md#alter-if-exists-20261126)
+
 用 `ALTER TABLE IF EXISTS shop.orders RENAME TO archived_orders` 改表名。原表不存在时会发出提示并跳过。新名字已被占用时仍会报错。新名字只写表名，表继续留在原来的模式里。改表名需要单独一条语句。临时表可写成 `ALTER TABLE pg_temp.orders RENAME TO archived_orders`。 [改表名测试](test-report.md#rename-name-checks-20261126)
 
 用 `ALTER TABLE ... RENAME COLUMN` 改列名时，已有的检查约束和生成列表达式会使用新列名。比如把 `"数量"` 改成 `"订购数量"` 后，正数检查和用数量计算的列仍会生效。双引号保留大小写，`"D"` 和 `d` 可以是不同的列。[改名和回滚测试](test-report.md#rename-quoted-column-references-20261122)

@@ -1,9 +1,20 @@
 # 更新日志
 
 <details>
+<summary>修改表时可以跳过不存在的表 · 2026-11-26</summary>
+
+用 `ALTER TABLE IF EXISTS` 给表加列、删列或改名时，如果表不存在，数据库会提示并跳过。
+
+在已经开始的事务里，跳过这条命令也省去了一次全库备份。
+
+[用法](docs/MANUAL.md#修改表) · [测试报告](docs/test-report.md#alter-if-exists-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-if-exists-cost-20261126)
+
+</details>
+
+<details>
 <summary>改表名时更快发现重名 · 2026-11-26</summary>
 
-在 ext4 测试盘上，库里多 32 张表时，改名遇到重名从约 2 秒缩短到约 40 毫秒。原表不存在时，可以用 `IF EXISTS` 跳过改名。
+在额外建了 32 张表的磁盘测试中，发现表名已被占用的时间从约 2 秒缩短到约 40 毫秒。
 
 [用法](docs/MANUAL.md#修改表) · [测试报告](docs/test-report.md#rename-name-checks-20261126) · [性能报告](docs/performance-report-2026-10-30.md#rename-name-checks-cost-20261126)
 
@@ -12,23 +23,20 @@
 <details>
 <summary>磁盘上的表改名更快 · 2026-11-26</summary>
 
-在 ext4 测试盘上，额外有 128 张表时，改一张表名的耗时从约 3.6 秒降到约 1.8 秒。
+在额外建了 128 张表的磁盘测试中，改一张表名的时间从约 3.6 秒缩短到约 1.8 秒。
 
 [测试报告](docs/test-report.md#backup-file-sync-20261126) · [性能报告](docs/performance-report-2026-10-30.md#backup-file-sync-cost-20261126)
 
 </details>
 
 <details>
-<summary>库里表多时，改表名更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 库里表多时，改表名更快
 
 在内存文件系统上，测试库多了 512 张表后，改一张表名的耗时从约 360–530 毫秒降到约 290–330 毫秒。
 
 [测试报告](docs/test-report.md#table-rename-caches-20261126) · [性能报告](docs/performance-report-2026-10-30.md#table-rename-caches-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 库里表多时，开始事务更快
 

@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 跳过不存在的表
+
+PostgreSQL 在执行普通 `ALTER TABLE` 前查找目标关系，带 `IF EXISTS` 时对缺表发出提示。SQLite 的 `ALTER TABLE` 直接修改保存的建表语句。DuckDB 的 `ALTER TABLE` 修改目录，改动随事务提交或回滚。 [PostgreSQL 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/tcop/utility.c#L1200-L1257) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html) · [DuckDB ALTER TABLE](https://duckdb.org/docs/1.5/sql/statements/alter_table)
+
+本项目在支持的表修改中检查 `IF EXISTS`。显式事务遇到缺表时无需先取得数据库独占锁来备份。实际改名继续使用整库恢复文件，保护同一事务内已完成的其他表修改和写入。 [功能测试](test-report.md#alter-if-exists-20261126) · [性能报告](performance-report-2026-10-30.md#alter-if-exists-cost-20261126)
+
 ## 2026-11-26 · 改名时检查原名和目标名
 
 PostgreSQL 支持 `ALTER TABLE IF EXISTS ... RENAME TO ...`，原表不存在时发出提示。SQLite 的改名语法更改同一个数据库内保存的表定义。DuckDB 也从目录层修改表名，视图引用需要另行处理。 [PostgreSQL ALTER TABLE](https://www.postgresql.org/docs/18/sql-altertable.html) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html) · [DuckDB ALTER TABLE](https://duckdb.org/docs/1.5/sql/statements/alter_table)

@@ -2660,27 +2660,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
 
     const bool standaloneRename = stmt->subCommands.size() == 1 &&
         stmt->subCommands.front().action == AlterTableStmt::Action::RenameTable;
-    const bool deferRenameBackup = standaloneRename && !g_engine.inTransaction();
-    std::string tableName;
-    if (!standaloneRename) tableName = resolveTableName(s, stmt->tableName);
-    std::string pendingTemporaryRename;
-    std::set<std::string> droppedOwnedSequenceStorageNames;
-
-    // ALTER TABLE actions can rewrite schemas, indexes, parameters, and
-    // relation files directly; the row-level undo log cannot restore those
-    // changes.  Run the whole statement inside the DDL transaction so any
-    // later action failure restores the pre-statement database snapshot.
-    DdlTransaction txn(s);
-    txn.enableSnapshotRollback();
-    if (!txn.begin(deferRenameBackup ? DdlTransaction::SnapshotTiming::BeforeChange
-                                     : DdlTransaction::SnapshotTiming::AtBegin)) {
-        std::cout << "DDL transaction begin failed" << std::endl;
-        return true;
-    }
-
-    // Validate the action set before making any change.  The transaction
-    // snapshot below additionally protects failures that occur after a
-    // storage primitive has already persisted an earlier subcommand.
+    // Reject unsupported actions before deciding that a missing table can
+    // skip the statement.
     for (const auto& sub : stmt->subCommands) {
         switch (sub.action) {
             case AlterTableStmt::Action::AddColumn:
@@ -2721,11 +2702,94 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
         }
     }
 
-    if (standaloneRename) tableName = resolveTableName(s, stmt->tableName);
     CatalogManager::QualifiedName requestedName;
-    const bool tableIsTemporary = CatalogManager::parseQualifiedName(
-        stmt->tableName, requestedName) && s.tempTables.count(requestedName.name) != 0 &&
+    if (!CatalogManager::parseQualifiedName(stmt->tableName, requestedName)) {
+        std::cout << "ERROR: invalid table name (SQLSTATE 42601)" << std::endl;
+        return true;
+    }
+
+    std::string tableName;
+    const bool checkSource = standaloneRename || stmt->ifExists;
+    enum class Source { Found, Missing, Error };
+    const auto resolveSource = [&]() {
+        try {
+            if (!checkSource) {
+                tableName = resolveTableName(s, stmt->tableName);
+                return Source::Found;
+            }
+            auto& catalog = g_engine.catalogService().get(s.currentDB);
+            const std::string schema = requestedName.schema == "pg_temp"
+                ? sessionTempSchemaName(s) : requestedName.schema;
+            const auto nameSpace = schema.empty()
+                ? std::nullopt : catalog.getNamespaceByName(schema);
+            const auto source = schema.empty()
+                ? catalog.resolveRelationSnapshot(stmt->tableName, effectiveRelationSearchPath(&s))
+                : (nameSpace ? catalog.getClassByName(requestedName.name, nameSpace->oid)
+                             : std::nullopt);
+            const auto wrongKind = [&]() {
+                if (standaloneRename)
+                    throw DbError("0A000", "ALTER TABLE RENAME requires a table");
+                throw DbError("42809", "\"" + requestedName.name + "\" is not a table");
+            };
+            if (source && source->relkind != 'r' && source->relkind != 'p')
+                wrongKind();
+            tableName = resolveTableName(s, stmt->tableName);
+            if (g_engine.viewExists(s.currentDB, tableName)) wrongKind();
+            if (g_engine.tableExists(s.currentDB, tableName)) return Source::Found;
+            if (source) throw DbError("58030", "relation storage is missing");
+            if (stmt->ifExists) return Source::Missing;
+            const bool ownTemporarySchema =
+                requestedName.schema == "pg_temp" && s.tempNamespaceCreated;
+            if (!schema.empty() && !nameSpace && !ownTemporarySchema &&
+                !g_engine.schemaExists(s.currentDB, requestedName.schema))
+                throw DbError("3F000", "schema \"" + requestedName.schema + "\" does not exist");
+            const auto missingName = requestedName.schema.empty()
+                ? requestedName.name : requestedName.schema + "." + requestedName.name;
+            throw DbError("42P01", "relation \"" + missingName + "\" does not exist");
+        } catch (const DbError& error) {
+            std::cout << "ERROR: " << error.what()
+                      << " (SQLSTATE " << error.sqlState() << ")" << std::endl;
+        } catch (const std::exception& error) {
+            std::cout << "ALTER TABLE catalog lookup failed: " << error.what() << std::endl;
+        }
+        return Source::Error;
+    };
+    const auto skipMissing = [&]() {
+        emitNotice("relation \"" + requestedName.name + "\" does not exist, skipping");
+        std::cout << "ALTER TABLE succeeded" << std::endl;
+        return false;
+    };
+
+    // A missing IF EXISTS target inside a transaction needs no DDL ownership.
+    // Resolve existing targets again after taking the exclusive lock.
+    if (!checkSource || (stmt->ifExists && g_engine.inTransaction())) {
+        const auto source = resolveSource();
+        if (source == Source::Missing) return skipMissing();
+        if (source == Source::Error) return true;
+    }
+    DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    if (!txn.begin(checkSource ? DdlTransaction::SnapshotTiming::BeforeChange
+                               : DdlTransaction::SnapshotTiming::AtBegin)) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+    if (checkSource) {
+        const auto source = resolveSource();
+        if (source == Source::Error) return true;
+        if (source == Source::Missing) {
+            if (!txn.commit()) return true;
+            return skipMissing();
+        }
+        if (!standaloneRename && !txn.prepareSnapshot()) {
+            std::cout << "DDL transaction begin failed" << std::endl;
+            return true;
+        }
+    }
+    const bool tableIsTemporary = s.tempTables.count(requestedName.name) != 0 &&
         tableName == tempTablePrefix(s, requestedName.name);
+    std::string pendingTemporaryRename;
+    std::set<std::string> droppedOwnedSequenceStorageNames;
 
     for (const auto& sub : stmt->subCommands) {
         // ADD COLUMN declaration conversion is pure. A rejected declaration
@@ -3134,44 +3198,6 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         return nameSpace ? catalog.getClassByName(name, nameSpace->oid)
                                          : std::nullopt;
                     };
-                    const auto source = tableIsTemporary
-                        ? relationByName(requestedName.name)
-                        : catalog.resolveRelationSnapshot(
-                            stmt->tableName, effectiveRelationSearchPath(&s));
-                    if ((source && source->relkind != 'r' && source->relkind != 'p') ||
-                        g_engine.viewExists(s.currentDB, tableName)) {
-                        std::cout << "ERROR: ALTER TABLE RENAME requires a table (SQLSTATE 0A000)"
-                                  << std::endl;
-                        return true;
-                    }
-                    if (!g_engine.tableExists(s.currentDB, tableName)) {
-                        if (source) {
-                            std::cout << "ERROR: relation storage is missing (SQLSTATE 58030)"
-                                      << std::endl;
-                            return true;
-                        }
-                        if (stmt->ifExists) {
-                            if (!txn.commit()) return true;
-                            emitNotice("relation \"" + requestedName.name +
-                                       "\" does not exist, skipping");
-                            std::cout << "ALTER TABLE succeeded" << std::endl;
-                            return false;
-                        }
-                        const bool ownTemporarySchema =
-                            requestedName.schema == "pg_temp" && s.tempNamespaceCreated;
-                        if (!requestedName.schema.empty() && !ownTemporarySchema &&
-                            !g_engine.schemaExists(s.currentDB, requestedName.schema)) {
-                            std::cout << "ERROR: schema \"" << requestedName.schema
-                                      << "\" does not exist (SQLSTATE 3F000)" << std::endl;
-                        } else {
-                            const auto missingName = requestedName.schema.empty()
-                                ? requestedName.name
-                                : requestedName.schema + "." + requestedName.name;
-                            std::cout << "ERROR: relation \"" << missingName
-                                      << "\" does not exist (SQLSTATE 42P01)" << std::endl;
-                        }
-                        return true;
-                    }
                     if (relationByName(sub.newName)) {
                         std::cout << "ERROR: relation \"" << sub.newName
                                   << "\" already exists (SQLSTATE 42P07)" << std::endl;
@@ -3196,7 +3222,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                            : qualifiedName.schema + "__" + sub.newName);
                 status = g_engine.alterTableRenameTable(
                     s.currentDB, tableName, physicalNewName, [&] {
-                        if (deferRenameBackup && !txn.enableSnapshotRollback())
+                        if (!txn.prepareSnapshot())
                             throw DbError("58030", "could not save files before renaming table");
                         txn.markSnapshotDirty();
                     });
