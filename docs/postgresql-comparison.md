@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 复用已保存的注释内容
+
+PostgreSQL 记录数据页变更，并在事务提交后通知其他连接更新目录缓存。SQLite 的回滚日志流程保存并写回变更页。DuckDB 的检查点将写入日志合入数据库文件。 [PostgreSQL WAL](https://www.postgresql.org/docs/18/wal-intro.html) · [PostgreSQL 目录缓存](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/cache/inval.c#L7-L33) · [SQLite 原子提交](https://www.sqlite.org/atomiccommit.html#writing_changes_to_the_database_file) · [DuckDB 检查点](https://duckdb.org/docs/1.5/sql/statements/checkpoint)
+
+本项目保留上次生成的注释文件内容，发生修改后才重新生成。事务启动继续检查文件是否被其他连接或进程更新。两版本的完整查询、启动事务、数据改动和注释写入均有实测对照。 [功能测试](test-report.md#description-publication-20261126) · [性能报告](performance-report-2026-10-30.md#description-publication-cost-20261126)
+
 ## 2026-11-26 · 按编号定位注释范围
 
 PostgreSQL 18.6 为 `pg_description` 建立了按对象编号、目录编号和列号排序的唯一 B-tree 索引。SQLite 的多列索引可利用开头的列定位记录。DuckDB 使用数据组的最小值和最大值跳过无匹配的组，也可以为部分等值查询使用 ART 索引。 [PostgreSQL 目录索引](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_description.h#L46-L64) · [SQLite 查询规划](https://www.sqlite.org/queryplanner.html#multicolumn) · [DuckDB 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)

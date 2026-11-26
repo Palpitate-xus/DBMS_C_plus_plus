@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>注释多时，普通读写更快 · 2026-11-26</summary>
+
+数据库可以复用已经保存的注释内容。在额外写入 4,096 条列注释的测试库里，按主键读一行从约 25.9 毫秒缩短到约 8.4 毫秒。
+
+[测试报告](docs/test-report.md#description-publication-20261126) · [性能报告](docs/performance-report-2026-10-30.md#description-publication-cost-20261126)
+
+</details>
+
+<details>
 <summary>按编号统计注释时少读数据 · 2026-11-26</summary>
 
 统计一段编号内的注释时，数据库可以直接找到这一段记录。额外写入 4,096 条列注释的测试中，整条查询从约 24.8 毫秒缩短到约 24.2 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按编号统计表注释更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 按编号统计表注释更快
 
 在额外写入 1,024 条列注释的测试库里，按编号范围统计表注释，从约 264 毫秒缩短到约 28 毫秒。
 
 [测试报告](docs/test-report.md#oid-comparison-20261126) · [性能报告](docs/performance-report-2026-10-30.md#oid-comparison-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 可以查看数据库怎样查找注释
 

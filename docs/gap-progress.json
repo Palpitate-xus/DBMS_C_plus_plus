@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 reuse unchanged encoded annotation files at transaction start",
+      "gap_ids": ["CAT-03", "TXN-05"],
+      "status": "partial",
+      "evidence": ["src/catalog/catalog.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/catalog_clean_publication_test.cpp", "tests/catalog_publication_scan_test.cpp", "tests/transaction_catalog_scope_test.cpp", "tests/object_description_protocol_e2e_test.py"],
+      "verification": [
+        "Verify real file identities, remap and removal, peer changes, a missing image, interrupted write, sync retry and failed reload.",
+        "Check savepoints, restore and crash recovery, including the supported and rejected time targets.",
+        "Measure BEGIN, comment reads and writes, and ordinary SELECT, INSERT, UPDATE and DELETE on the same fixture."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 seek comment ranges by object number",
       "gap_ids": ["CAT-03", "OPT-01", "MON-01"],
       "status": "partial",

@@ -55,9 +55,12 @@ int main() {
         owner.setDescription(rel, 1259, 0, "before");
         assert(owner.persistAll());
         const auto path = root / "pg_class.cat";
+        const auto descriptionPath = root / "pg_description.cat";
         const auto first = identity(path);
+        const auto firstDescription = identity(descriptionPath);
         for (int repetition = 0; repetition < 4; ++repetition)
-            assert(owner.persistAll());
+            assert(owner.persistCurrent() == CatalogManager::PersistResult::Published);
+        assert(unchanged(firstDescription, identity(descriptionPath)));
         if (!unchanged(first, identity(path))) {
             std::cerr << "unchanged catalog image was atomically republished\n";
             assert(false);
@@ -79,7 +82,6 @@ int main() {
         CatalogManager observer(root.string());
         owner.setDescription(rel, 1259, 0, "peer");
         assert(owner.persistAll());
-        const auto descriptionPath = root / "pg_description.cat";
         const auto description = identity(descriptionPath);
         assert(observer.persistAll());
         assert(observer.getDescription(rel, 1259, 0) == "peer");
@@ -174,6 +176,46 @@ int main() {
         assert(owner.listClasses().size() == 1);
         fs::rename(savedType, typePath);
         assert(owner.persistAll());
+
+        PgAttributeRow column;
+        column.attrelid = rel;
+        column.atttypid = 23;
+        column.attnum = 1;
+        column.attname = "old_column";
+        owner.addAttribute(column);
+        owner.setDescription(rel, PgClassOid_Class, 1, "dropped");
+        owner.setDescription(rel, PgClassOid_Class, 2, "retained");
+        assert(owner.persistAll());
+        assert(!owner.hasUnpublishedChanges());
+        assert(owner.remapColumnMetadataAfterDrop(rel, 1));
+        assert(owner.hasUnpublishedChanges());
+        assert(owner.persistDescriptions());
+        assert(!owner.hasUnpublishedChanges());
+        assert(CatalogManager::readDescription(root.string(), rel, 1, "pg_class") == "retained");
+        assert(!CatalogManager::readDescription(root.string(), rel, 2, "pg_class"));
+
+        // Repair still writes a missing file using the proven local image.
+        fs::remove(descriptionPath);
+        assert(owner.persistAll());
+        assert(CatalogManager::readDescription(root.string(), rel, 1, "pg_class") == "retained");
+
+        // A failed explicit load restores both unsaved rows and their state.
+        owner.setDescription(rel, PgClassOid_Class, 1, "local description");
+        fs::copy_file(typePath, savedType);
+        {
+            std::ofstream invalid(typePath, std::ios::binary | std::ios::trunc);
+            invalid << "not-a-catalog-record\n";
+        }
+        rejected = false;
+        try { owner.loadAll(); }
+        catch (const std::exception&) { rejected = true; }
+        assert(rejected);
+        assert(owner.hasUnpublishedChanges());
+        assert(owner.getDescription(rel, PgClassOid_Class, 1) == "local description");
+        fs::rename(savedType, typePath);
+        owner.loadAll();
+        assert(!owner.hasUnpublishedChanges());
+        assert(owner.getDescription(rel, PgClassOid_Class, 1) == "retained");
     }
     fs::remove_all(root);
     std::cout << "catalog clean publication, content edits and peer safety OK\n";
