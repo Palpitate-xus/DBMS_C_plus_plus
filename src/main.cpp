@@ -6018,6 +6018,7 @@ static bool explainPreparedDmlQuery(Session&,const string&,
 static bool canRunPreparedIntegerJoin(const dbms::PreparedQuery&, const Session&);
 static bool usesDemandedLogicalRead(const dbms::PreparedQuery&);
 static bool hasPreparedViewSource(const dbms::PreparedQuery&);
+static bool usesForwardViewInputs(const dbms::PreparedQuery&);
 
 static bool simpleJoinFilter(const dbms::Expr* expression) {
     if (!expression) return true;
@@ -21343,6 +21344,7 @@ class PreparedWithDmlRuntime {
         string preparedPlanNodeName() const override {return planName;}
         map<string,string> preparedPlanAttributes() const override {
             auto attributes = planAttributes;
+            if (opened) attributes.emplace("retainedInputRows", to_string(rows.size()));
             if (planKeyFilter && planKeyFilter->lookupBuilt()) {
                 if (attributes.count("integerKeyLookup")) {
                     attributes["integerKeyLookupBuilt"] = "true";
@@ -22314,6 +22316,7 @@ public:
     dbms::DmlResult runRead(size_t receiverRows = 0, bool captureOwnedRows = false,
                            bool planRootConstants = true, bool derivedArrayResult = false) {
         if(!readRoot_)throw dbms::DbError("XX000","read runtime requires a genuine SELECT/VALUES");
+        streamResults_ = streamResults_ || usesForwardViewInputs(*query_);
         const bool captureTyped=captureOwnedRows || dbms::typedResultCaptureRequested();
         Frames frames{definitions(readRoot_->ctes,validation_.context())};
         bool hasWriter=false;
@@ -22452,6 +22455,14 @@ static bool supportsPreparedViewRead(const dbms::PreparedQuery& query) {
     return all_of(query.sourceRanges.begin(), query.sourceRanges.end(), [](const auto& range) {
         return !range.viewQuery || supportsPreparedViewRead(*range.viewQuery);
     });
+}
+
+static bool usesForwardViewInputs(const dbms::PreparedQuery& query) {
+    // SELECT sources are consumed in ordinal order. Joins and CTE producers
+    // own their own buffers for inputs that can be visited more than once.
+    return any_of(query.sourceRanges.begin(), query.sourceRanges.end(), [](const auto& range) {
+        return range.source && range.viewQuery;
+    }) && supportsPreparedViewRead(query);
 }
 
 static bool hasPreparedViewSource(const dbms::PreparedQuery& query) {
@@ -23794,7 +23805,8 @@ static bool explainPreparedReadQuery(Session& session,const string& raw,
     const dbms::QueryPlanner::ExplainOptions& options,bool json,
     shared_ptr<dbms::PreparedQuery> query) {
     if(!query)query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
-    PreparedWithDmlRuntime runtime(session,query,usesDemandedLogicalRead(*query),!options.analyze);
+    PreparedWithDmlRuntime runtime(session,query,
+        usesDemandedLogicalRead(*query) || usesForwardViewInputs(*query), !options.analyze);
     auto plan=runtime.queryPlan();
     // Writer completion is part of the exact successful statement. The
     // publication sink remains outer-commit gated by execute().
@@ -23833,7 +23845,7 @@ static bool handlePreparedMultirowQuery(const string& raw,Session& session,bool&
         return call && call->setReturning.has_value();
     });
     if(!quantified && !setReturning)return false;
-    PreparedWithDmlRuntime runtime(session,query);
+    PreparedWithDmlRuntime runtime(session,query,usesForwardViewInputs(*query));
     auto plan=runtime.queryPlan();
     dbms::DmlResult descriptor;descriptor.available=true;descriptor.metadataOnly=true;descriptor.runtimeErrorMetadata=true;
     for(const auto& column:query->output){descriptor.columns.push_back(column.name);descriptor.columnTypes.push_back(column.type);}

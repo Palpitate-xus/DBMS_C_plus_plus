@@ -222,6 +222,14 @@ def exercise_ranges(wire, peer, schema, reference):
     )
     for condition, expected, fetched, intervals in cases:
         verify_range_plan(check(condition, expected), fetched, intervals)
+    if not reference:
+        query = f"SELECT number FROM {outer} WHERE number + 0 BETWEEN 3 AND 1026 ORDER BY number"
+        nodes = list(plan_nodes(explain_plan(wire, query)["plan"]))
+        inputs = [node for node in nodes if "retainedInputRows" in node]
+        assert sum(node["nodeType"] == "View Scan" for node in inputs) == 3, inputs
+        assert all(node["retainedInputRows"] == "0" for node in inputs), inputs
+        assert any(node["nodeType"] == "TableScan" and node.get("actualRows") == len(ids)
+                   for node in nodes), query
     check("number < 3", [])
     check("number > 2147483647::bigint", [])
     check("number BETWEEN NULL AND 7", [])
@@ -290,6 +298,36 @@ def exercise_ranges(wire, peer, schema, reference):
     wire.command("ROLLBACK", "ROLLBACK")
 
 
+def exercise_reusable_view_inputs(wire, schema, reference):
+    view = f"{schema}.range_outer"
+    labels = f"{schema}.labels"
+    wire.command(f"CREATE TABLE {labels}(id int, tag text)", "CREATE TABLE")
+    wire.command(f"INSERT INTO {labels} VALUES (3,'a'),(3,'b'),(4,'c'),(5,'d')", "INSERT 0 4")
+    for reader in (wire, Wire(wire.client, wire.sock, extended=True)):
+        reader.query(f"SELECT m.tag,v.number FROM {labels} m LEFT JOIN {view} v ON m.id=v.number ORDER BY m.tag",
+                     rows=[("a", "3"), ("b", "3"), ("c", None), ("d", "5")], tag="SELECT 4",
+                     fields=[("tag", 25), ("number", 23)])
+        reader.query(f"WITH pick AS MATERIALIZED (SELECT number FROM {view} WHERE number<=7) "
+                     "SELECT a.number AS a,b.number AS b FROM pick a CROSS JOIN pick b WHERE a.number<b.number ORDER BY a,b",
+                     rows=[("3", "5"), ("3", "7"), ("5", "7")], tag="SELECT 3",
+                     # This shape already lacked an extended RowDescription.
+                     fields=[("a", 23), ("b", 23)] if reference or not reader.extended else None)
+
+    sequence, counted = f"{schema}.view_calls", f"{schema}.counted_v"
+    wire.command(f"CREATE SEQUENCE {sequence} START WITH 100", "CREATE SEQUENCE")
+    wire.command(f"CREATE VIEW {counted} AS SELECT nextval('{sequence}') AS n FROM {labels}", "CREATE VIEW")
+    wire.query(f"SELECT nextval('{sequence}') AS n", rows=[("100",)], fields=[("n", 20)])
+    wire.query(f"SELECT n FROM {counted} LIMIT 0", tag="SELECT 0", fields=[("n", 20)])
+    wire.query(f"SELECT currval('{sequence}') AS n", rows=[("100",)], fields=[("n", 20)])
+    wire.query(f"SELECT n FROM {counted} LIMIT 2", rows=[("101",), ("102",)], tag="SELECT 2", fields=[("n", 20)])
+    wire.query(f"SELECT currval('{sequence}') AS n", rows=[("102",)], fields=[("n", 20)])
+    wire.query(f"WITH sampled AS MATERIALIZED (SELECT n FROM {counted} LIMIT 2) "
+               "SELECT a.n AS a,b.n AS b FROM sampled a CROSS JOIN sampled b ORDER BY a,b",
+               rows=[("103", "103"), ("103", "104"), ("104", "103"), ("104", "104")], tag="SELECT 4",
+               fields=[("a", 20), ("b", 20)])
+    wire.query(f"SELECT currval('{sequence}') AS n", rows=[("104",)], fields=[("n", 20)])
+
+
 def main():
     client = runner.load_protocol_client()
     reference = sys.argv[1:] == ["--reference18"]
@@ -315,6 +353,7 @@ def main():
             startup(peer, user, database, password)
             exercise(wire, Wire(client, peer), schema, reference)
             exercise_ranges(wire, Wire(client, peer), schema, reference)
+            exercise_reusable_view_inputs(wire, schema, reference)
         print("[INDEXED VIEW READS] passed", flush=True)
     finally:
         if server:

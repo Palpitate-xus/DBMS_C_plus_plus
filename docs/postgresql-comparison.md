@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="forward-view-inputs-comparison-20261126"></a>
+## 2026-11-26 · 按需向上层视图交付记录
+
+PostgreSQL 的上层执行步骤会逐行向下取数据，需要排序时由排序节点保存记录。SQLite 的协程子查询可以按需交付单行，多次访问同一个结果时则可能保存中间行。DuckDB 把成批的列数据沿执行计划向前传递。 [PostgreSQL 执行器](https://www.postgresql.org/docs/18/executor.html) · [SQLite 子查询协程](https://www.sqlite.org/optoverview.html#subquery_co_routines) · [DuckDB 执行模型](https://duckdb.org/docs/internals/overview)
+
+本项目在受支持的只读视图查询中停用顺序读取数据源的重复行缓存。需要复用结果的连接输入和 `WITH` 仍由各自的执行步骤管理。排序和最终结果也各自保留所需数据。 [测试报告](test-report.md#forward-view-inputs-20261126) · [性能报告](performance-report-2026-10-30.md#forward-view-input-cost-20261126)
+
 <a id="view-wide-key-ranges-comparison-20261126"></a>
 ## 2026-11-26 · 按记录位置选择较大范围的读取方式
 

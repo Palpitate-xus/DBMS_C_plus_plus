@@ -1,9 +1,18 @@
 # 更新日志
 
 <details>
-<summary>报表查上千个编号时也可以少读数据</summary>
+<summary>查多层报表时少占内存</summary>
 
-例如，查一段订单号时，如果这些订单集中存放，数据库可以用索引只读取相关的那部分数据。
+例如，一份订单报表来自另一份报表时，数据库可以逐条传递记录，省去在每一步留一份副本的开销。排序或多次使用同一批记录时，仍会保留需要的数据。
+
+2026-11-26 · [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#forward-view-inputs-20261126) · [性能报告](docs/performance-report-2026-10-30.md#forward-view-input-cost-20261126)
+
+</details>
+
+<details>
+<summary>查上千个订单号也能少读数据</summary>
+
+例如，要查 1,000 个连续的订单号，如果这些订单集中存放，数据库可以只读取表里相关的记录。
 
 如果订单散落在表的大部分位置，或内存设置容不下这次读取，数据库会按原来的方式扫描表。
 
@@ -12,9 +21,9 @@
 </details>
 
 <details>
-<summary>从报表里查一段编号更快了</summary>
+<summary>按一小段订单号查报表更快了</summary>
 
-例如，查编号 100 到 115 的订单时，数据库可以先用原表的索引找到这段编号，再按报表的条件筛选和分页。
+例如，查订单号 100 到 115 时，数据库可以先找到这批订单，再按报表上的条件筛选。
 
 也可以一次查两段分开的编号。查询涉及大量记录时，数据库仍可选择顺序读取原表。
 
@@ -23,18 +32,15 @@
 </details>
 
 <details>
-<summary>从多层报表按编号找记录更快了</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 从多层报表按编号找记录更快了
 
 例如，按订单号查一笔订单时，数据库可以用原表的索引找到它，再确认它是否该出现在报表里。
 
 即使报表给订单号换了名字，也可以用这个方法查找。查询计划会显示经过的报表和实际读取的记录数。
 
-2026-11-26 · [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#indexed-view-reads-20261126) · [性能报告](docs/performance-report-2026-10-30.md#indexed-view-read-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#indexed-view-reads-20261126) · [性能报告](docs/performance-report-2026-10-30.md#indexed-view-read-cost-20261126)
 
 ## 2026-11-26 · 部分报表打开得更快了
 

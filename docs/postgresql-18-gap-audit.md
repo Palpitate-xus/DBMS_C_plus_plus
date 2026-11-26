@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 视图读取减少重复保留的行
+
+支持的只读视图计划逐行传递已绑定值，单向读取的数据源不再额外保留已处理的行。连接输入、复用的 `WITH`、排序及最终结果按原有需求保留数据。`CAT-16`、`QRY-12` 和 `OPT-16` 保持部分实现。 [功能测试](test-report.md#forward-view-inputs-20261126) · [性能报告](performance-report-2026-10-30.md#forward-view-input-cost-20261126)
+
 ## 2026-11-26 · 较大的整数主键范围可按页使用索引
 
 已有整数主键范围可分批收集完整候选集。实际页覆盖超过表的一半或工作内存不足时，使用原有表扫描。完整范围、索引边界与原表行逐步核对，仍受现有事务可见性策略约束。`QRY-12`、`OPT-05` 和 `IDX-03` 保持部分实现。 [功能测试](test-report.md#view-wide-key-ranges-20261126) · [性能报告](performance-report-2026-10-30.md#view-wide-key-range-cost-20261126)

@@ -6,6 +6,10 @@
 
 截至 2026-11-26，273 项功能要求中有 22 项完成、170 项部分实现、66 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-26 · 多层视图逐行传递数据
+
+受支持的只读视图查询省去数据源的重复行缓存。连接、排序和复用 `WITH` 查询时，由相应步骤保留自己的数据。可用 `retainedInputRows` 检查一个数据源保留了几行。 [测试报告](test-report.md#forward-view-inputs-20261126) · [性能报告](performance-report-2026-10-30.md#forward-view-input-cost-20261126)
+
 ## 2026-11-26 · 范围查询按实际页数决定是否用索引
 
 单列整数主键范围可以分批读取超过 256 条候选记录。能否继续走索引取决于实际涉及的数据页、内存设置和事务可见性。表的直接查询和受支持的普通视图共用这条路径。 [测试报告](test-report.md#view-wide-key-ranges-20261126) · [性能报告](performance-report-2026-10-30.md#view-wide-key-range-cost-20261126)
