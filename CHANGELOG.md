@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>保存注释更快 · 2026-11-26</summary>
+
+保存模式、表或列的注释时，数据库只备份相关文件。在额外建了 128 张表的测试库里，保存模式注释从约 100 毫秒降到约 16 毫秒。
+
+[使用说明](docs/MANUAL.md#查看对象注释) · [回滚测试](docs/test-report.md#comment-file-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#comment-file-undo-cost-20261126)
+
+</details>
+
+<details>
 <summary>可以查询表、列和其他对象的注释 · 2026-11-26</summary>
 
 用 SQL 可以读回给模式、表、列、索引、视图、序列和类型写的注释，换行和引号也会原样保留。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以查出临时表放在哪个分组 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 可以查出临时表放在哪个分组
 
 每个连接的临时表放在自己的分组里。现在可以查到这个分组的编号，也可以在列表里隐藏其他连接的临时分组。
 
 [使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#temp-schema-inspection-20261126) · [性能报告](docs/performance-report-2026-10-30.md#temp-schema-inspection-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 第一次建立临时表分组更快
 

@@ -1189,6 +1189,7 @@ public:
     // acquired its database lock. Ordinary row transactions do not need one.
     bool createTransactionBackup();
     bool beginCreateTableUndo(const std::string& dbname);
+    std::function<bool()> prepareCommentUndo(const std::string& dbname, bool compatibilityFile);
 
     // A later file-rewriting DDL statement in the same outer transaction
     // needs its own statement image. The transaction image remains reserved
@@ -2454,6 +2455,7 @@ private:
     // transaction lock and flushed all durable state.
     void lockDatabaseForDdl();
     bool recordCreateTableUndo(const std::string& dbname, const TableSchema& table);
+    bool ensureCreateUndoImage(const std::string& dbname);
     bool recoverCreateTableUndo(const std::string& dbname,
                                 const std::set<uint64_t>& committed,
                                 const std::set<uint64_t>& aborted,
@@ -2781,7 +2783,8 @@ private:
         std::string txnBackupPath;
         bool transactionBackupDirty = false;
         std::shared_ptr<TruncateUndoContext> truncateUndo;
-        bool truncateCommitUncertain = false;
+        bool scopedDdlCommitUncertain = false;
+        bool hasCommentUndo = false;
         std::shared_ptr<void> createTableUndoFence;
         bool createTableUndoCleanupFailed = false;
         bool restoreBackupBeforeRowUndo = false;

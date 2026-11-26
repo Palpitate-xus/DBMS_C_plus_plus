@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 保存注释时缩小备份范围
+
+PostgreSQL 18.6 用对象编号定位并修改单条注释记录。SQLite 的回滚日志保存将被修改的页。DuckDB 把注释保存在目录对象的元数据中。 [PostgreSQL 注释写入源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/comment.c#L149-L200) · [SQLite 回滚日志](https://sqlite.org/atomiccommit.html#creating_a_rollback_journal) · [DuckDB COMMENT ON](https://duckdb.org/docs/1.5/sql/statements/comment_on)
+
+本项目沿用建表恢复日志，在写入前保存相关目录和旧版兼容注释文件。普通写入只更新这次注释涉及的文件。事务已经需要整库备份，或旧目录需要补登记表结构时，沿用完整备份流程。数据库级写锁仍持有到事务结束，带恢复目标的启动暂不处理尚未清理的这类日志。 [回滚测试](test-report.md#comment-file-undo-20261126) · [性能报告](performance-report-2026-10-30.md#comment-file-undo-cost-20261126)
+
 ## 2026-11-26 · 读取已保存的对象注释
 
 PostgreSQL 18.6 的 `pg_description` 用对象编号、所属目录和子对象编号标识注释，`obj_description` 和 `col_description` 读取对应记录。DuckDB 也支持 `COMMENT ON`，可用目录函数查看注释。SQLite 在 `sqlite_schema` 中保存对象的建表或建索引定义。 [PostgreSQL 注释目录](https://www.postgresql.org/docs/18/catalog-pg-description.html) · [PostgreSQL 注释函数源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/system_functions.sql#L274-L310) · [DuckDB COMMENT ON](https://duckdb.org/docs/1.5/sql/statements/comment_on) · [SQLite 模式表](https://sqlite.org/schematab.html)

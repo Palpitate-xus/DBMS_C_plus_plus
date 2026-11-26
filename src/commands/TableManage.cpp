@@ -2097,11 +2097,13 @@ constexpr const char* kCreateUndoCleanupMember = "cleanup";
 constexpr size_t kCreateUndoImageLimit = 256 * 1024 * 1024;
 // Keep allocator counters out of the undo image. They must never move
 // backwards after recovery even if the objects using those IDs disappear.
-const std::array<const char*, 11> kCreateUndoCatalogPaths = {
+const std::array<const char*, 12> kCreateUndoCatalogPaths = {
     "tlist.lst", ".inherits", ".comments", ".exclusions", ".permissions",
     ".grant_chain", "pg_catalog/pg_class.cat", "pg_catalog/pg_attribute.cat",
-    "pg_catalog/pg_attrdef.cat", "pg_catalog/pg_depend.cat", "pg_catalog/pg_constraint.cat"};
+    "pg_catalog/pg_attrdef.cat", "pg_catalog/pg_depend.cat", "pg_catalog/pg_constraint.cat",
+    "pg_catalog/pg_description.cat"};
 constexpr size_t kCreateUndoV2PathCount = 10;
+constexpr size_t kCreateUndoV3PathCount = 11;
 
 std::string createUndoBinding(const std::filesystem::path& database,
                               const std::string& header) {
@@ -2128,21 +2130,34 @@ bool readCreateUndoFile(const std::filesystem::path& path, size_t limit,
 }
 
 bool captureCreateUndoCatalog(const std::filesystem::path& database,
-                              const std::string& header, std::string& image) {
+                              const std::string& header, std::string& image,
+                              bool includeDescriptions) {
     std::error_code error;
     if (std::filesystem::symlink_status(database / "pg_catalog", error).type() !=
             std::filesystem::file_type::directory || error) return false;
-    image = "CTUC3" + createUndoBinding(database, header);
-    for (const char* name : kCreateUndoCatalogPaths) {
+    image = (includeDescriptions ? "CTUC4" : "CTUC3") + createUndoBinding(database, header);
+    const size_t pathCount = includeDescriptions ? kCreateUndoCatalogPaths.size() : kCreateUndoV3PathCount;
+    for (size_t i = 0; i < pathCount; ++i) {
+        constexpr size_t overhead = 8 + create_table_undo::digestBytes;
+        if (image.size() > kCreateUndoImageLimit - overhead) return false;
         std::optional<std::string> bytes;
-        if (!readCreateUndoFile(database / name, kCreateUndoImageLimit, bytes)) return false;
-        if (bytes && bytes->size() > kCreateUndoImageLimit - image.size() - 8) return false;
+        if (!readCreateUndoFile(database / kCreateUndoCatalogPaths[i],
+                                kCreateUndoImageLimit - image.size() - overhead, bytes)) return false;
         relation_name_codec::append(image, bytes ? bytes->size() + 1 : 0, 8);
         if (bytes) image += *bytes;
-        if (image.size() > kCreateUndoImageLimit - 64) return false;
     }
     image += SHA256::hash(image);
     return true;
+}
+
+bool restoreCreateUndoPath(const std::filesystem::path& path, const std::optional<std::string>& bytes) {
+    std::error_code error;
+    const auto type = std::filesystem::symlink_status(path, error).type();
+    if ((error && error != std::errc::no_such_file_or_directory) ||
+        (type != std::filesystem::file_type::regular && type != std::filesystem::file_type::not_found))
+        return false;
+    if (bytes) return index_file::writeAtomically(path, *bytes, index_file::DirectorySync::RetryOnce);
+    return type == std::filesystem::file_type::not_found || index_file::removeDurably(path);
 }
 
 bool restoreCreateUndoCatalog(const std::filesystem::path& database,
@@ -2156,7 +2171,8 @@ bool restoreCreateUndoCatalog(const std::filesystem::path& database,
     const auto binding = createUndoBinding(database, *header);
     size_t pathCount = kCreateUndoCatalogPaths.size();
     if (image->compare(0, 69, "CTUC2" + binding) == 0) pathCount = kCreateUndoV2PathCount;
-    else if (image->compare(0, 69, "CTUC3" + binding) != 0) return false;
+    else if (image->compare(0, 69, "CTUC3" + binding) == 0) pathCount = kCreateUndoV3PathCount;
+    else if (image->compare(0, 69, "CTUC4" + binding) != 0) return false;
     std::error_code directoryError;
     if (std::filesystem::symlink_status(database / "pg_catalog", directoryError).type() !=
             std::filesystem::file_type::directory || directoryError) return false;
@@ -2177,22 +2193,8 @@ bool restoreCreateUndoCatalog(const std::filesystem::path& database,
     }
     if (offset != payload.size() || !before.front() ||
         !relation_name_codec::decode(*before.front())) return false;
-    for (size_t i = 0; i < before.size(); ++i) {
-        const auto path = database / kCreateUndoCatalogPaths[i];
-        std::error_code error;
-        const auto type = std::filesystem::symlink_status(path, error).type();
-        if ((error && error != std::errc::no_such_file_or_directory) ||
-            (type != std::filesystem::file_type::regular &&
-             type != std::filesystem::file_type::not_found)) return false;
-        if (before[i]) {
-            if (!index_file::writeAtomically(path, *before[i],
-                                             index_file::DirectorySync::RetryOnce))
-                return false;
-        } else if (type != std::filesystem::file_type::not_found &&
-                   !index_file::removeDurably(path)) {
-            return false;
-        }
-    }
+    for (size_t i = 0; i < before.size(); ++i)
+        if (!restoreCreateUndoPath(database / kCreateUndoCatalogPaths[i], before[i])) return false;
     return true;
 }
 
@@ -53245,7 +53247,7 @@ static bool parsePreparedLockMode(const std::string& value,
 static bool validPhysicalBackupSource(
     const std::filesystem::path& source, std::string& sourceDatabase);
 
-bool StorageEngine::recordCreateTableUndo(const std::string& dbname, const TableSchema& table) {
+bool StorageEngine::ensureCreateUndoImage(const std::string& dbname) {
     const auto& context = transactionContext();
     if (context.txnDB != dbname || !context.databaseExclusiveLock ||
         !context.databaseExclusiveLock->owns_lock()) return false;
@@ -53262,7 +53264,11 @@ bool StorageEngine::recordCreateTableUndo(const std::string& dbname, const Table
         const Lsn anchor = wal->currentWriteLsn();
         const auto header = create_table_undo::encodeHeader(
             {context.currentTxnId, wal->timelineId(), anchor});
-        if (header.empty() || !captureCreateUndoCatalog(directory, header, image) ||
+        // Large annotations must not reduce the range of databases that can
+        // use the pre-existing CREATE TABLE journal. COMMENT checks that its
+        // file is part of the image before using the scoped undo.
+        if (header.empty() || (!captureCreateUndoCatalog(directory, header, image, true) &&
+                               !captureCreateUndoCatalog(directory, header, image, false)) ||
             (anchor != 0 && !wal->XLogFlush(anchor))) return false;
         const auto stage = makeCreateUndoStage(directory);
         if (stage.empty()) return false;
@@ -53285,6 +53291,12 @@ bool StorageEngine::recordCreateTableUndo(const std::string& dbname, const Table
             owner.xid != context.currentTxnId || owner.timeline != wal->timelineId())
             return false;
     }
+    return true;
+}
+
+bool StorageEngine::recordCreateTableUndo(const std::string& dbname, const TableSchema& table) {
+    if (!ensureCreateUndoImage(dbname)) return false;
+    const auto journal = dbPath(dbname) / kCreateUndo;
     const auto receipt = create_table_undo::encodeBirth(
         {table.physicalRelationId, table.tablename, table.tablespace});
     return !receipt.empty() && index_file::writeAtomicallyNoReplace(
@@ -59452,6 +59464,39 @@ bool StorageEngine::beginCreateTableUndo(const std::string& dbname) {
     return true;
 }
 
+std::function<bool()> StorageEngine::prepareCommentUndo(const std::string& dbname, bool compatibilityFile) {
+    if (!beginCreateTableUndo(dbname) || hasTransactionBackup() || !ensureCreateUndoImage(dbname)) return {};
+    const auto root = dbPath(dbname);
+    {
+        const auto image = root / kCreateUndo / "catalog";
+        std::error_code error;
+        if (std::filesystem::symlink_status(image, error).type() !=
+                std::filesystem::file_type::regular || error) return {};
+        std::ifstream in(image, std::ios::binary);
+        char version[5];
+        if (!in.read(version, sizeof(version)) || std::string_view(version, sizeof(version)) != "CTUC4")
+            return {};
+    }
+    transactionContext().hasCommentUndo = true;
+    const auto description = root / "pg_catalog" / "pg_description.cat";
+    const auto compatibility = root / ".comments";
+    std::optional<std::string> oldDescription, oldCompatibility;
+    if (!readCreateUndoFile(description, kCreateUndoImageLimit, oldDescription) ||
+        (compatibilityFile && !readCreateUndoFile(compatibility, kCreateUndoImageLimit, oldCompatibility)))
+        return {};
+
+    // Savepoints use the statement's file versions. Restart uses the older
+    // transaction image, which is durable before either file can change.
+    return [this, dbname, description, compatibility, compatibilityFile,
+            oldDescription = std::move(oldDescription), oldCompatibility = std::move(oldCompatibility)] {
+        if (!restoreCreateUndoPath(description, oldDescription) ||
+            (compatibilityFile && !restoreCreateUndoPath(compatibility, oldCompatibility))) return false;
+        if (catalogService_) catalogService_->evict(dbname);
+        clearCatalogSnapshot();
+        return true;
+    };
+}
+
 void StorageEngine::lockDatabaseForDdl() {
     auto& context = transactionContext();
     // A scoped DDL owner may opt in after BEGIN. Hold exclusive ownership
@@ -59755,7 +59800,8 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionContext().ddlUndoActions.clear();
     transactionContext().accessedTemporaryObjects = false;
     transactionContext().truncateUndo.reset();
-    transactionContext().truncateCommitUncertain = false;
+    transactionContext().scopedDdlCommitUncertain = false;
+    transactionContext().hasCommentUndo = false;
     transactionContext().transactionBackupDirty = false;
     transactionContext().restoreBackupBeforeRowUndo = false;
     transactionContext().txnLogSizeAtBackup = 0;
@@ -60416,13 +60462,13 @@ DBStatus StorageEngine::commitTransaction() {
     const Lsn commitLsn = noEffects ? INVALID_LSN : walXactCommit(committingDb, committingTxnId);
     if (!noEffects && (commitLsn == INVALID_LSN || !wal->XLogFlush(commitLsn))) {
         releaseCommitHeapPageLocks();
-        if (committingContext.truncateUndo) {
+        if (committingContext.truncateUndo || committingContext.hasCommentUndo) {
             // A failed append or sync can leave a readable COMMIT record.
             // Keep the before-image and prevent a contradictory live undo.
-            committingContext.truncateCommitUncertain = true;
+            committingContext.scopedDdlCommitUncertain = true;
             committingContext.rollbackPending = true;
             setDatabaseRollbackPending(committingDb, committingTxnId, true);
-            std::cerr << "[truncate] uncertain commit for " << committingDb
+            std::cerr << "[transaction] uncertain file-backed DDL commit for " << committingDb
                       << ":" << committingTxnId << "; restart to recover the outcome\n";
             return DBStatus::IO_ERROR;
         }
@@ -61003,7 +61049,7 @@ DBStatus StorageEngine::rollbackTransaction() {
     lockManager_.setResourceNamespace(transactionContext().txnDB);
 
     auto& rollbackContext = transactionContext();
-    if (rollbackContext.rollbackRunning || rollbackContext.truncateCommitUncertain)
+    if (rollbackContext.rollbackRunning || rollbackContext.scopedDdlCommitUncertain)
         return DBStatus::IO_ERROR;
     rollbackContext.rollbackPending = true;
     rollbackContext.rollbackRunning = true;

@@ -3082,7 +3082,7 @@ CatalogManager::ConstraintIdentities CatalogManager::readConstraintIdentities(co
     return catalog.constraintIdentities(relation, referenced, constraint);
 }
 
-std::map<std::string, std::string> CatalogManager::serializeAllLocked(bool namespacesOnly) const {
+std::map<std::string, std::string> CatalogManager::serializeAllLocked(WriteScope scope) const {
     std::map<std::string, std::string> images;
     auto persist = [&](const char* name,
                        const std::function<void(std::ostream&)>& writer) {
@@ -3094,6 +3094,19 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked(bool names
         images.emplace(name, image.str());
     };
 
+    if (scope != WriteScope::Namespaces) {
+        persist("description", [&](std::ostream& out) {
+            for (const auto& row : descriptions_) {
+                writeOid(out, row.objoid); out << ',';
+                writeOid(out, row.classoid); out << ',';
+                out << row.objsubid << ',';
+                writeString(out, row.description);
+                out << '\n';
+            }
+        });
+        if (scope == WriteScope::Descriptions) return images;
+    }
+
     // pg_namespace
     persist("namespace", [&](std::ostream& out) {
         for (const auto& r : namespaces_) {
@@ -3102,7 +3115,7 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked(bool names
             writeOid(out, r.nspowner); out << '\n';
         }
     });
-    if (namespacesOnly) return images;
+    if (scope == WriteScope::Namespaces) return images;
 
     // pg_class
     persist("class", [&](std::ostream& out) {
@@ -3283,17 +3296,6 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked(bool names
         }
     });
 
-    // pg_description
-    persist("description", [&](std::ostream& out) {
-        for (const auto& r : descriptions_) {
-            writeOid(out, r.objoid); out << ',';
-            writeOid(out, r.classoid); out << ',';
-            out << r.objsubid << ',';
-            writeString(out, r.description);
-            out << '\n';
-        }
-    });
-
     return images;
 }
 
@@ -3356,10 +3358,14 @@ CatalogManager::PersistResult CatalogManager::persistCurrent() {
 }
 
 bool CatalogManager::persistNamespaces() {
-    return persistAllImpl(false, true) == PersistResult::Published;
+    return persistAllImpl(false, WriteScope::Namespaces) == PersistResult::Published;
 }
 
-CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace, bool namespacesOnly) {
+bool CatalogManager::persistDescriptions() {
+    return persistAllImpl(false, WriteScope::Descriptions) == PersistResult::Published;
+}
+
+CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace, WriteScope scope) {
     std::error_code pathError;
     const auto catalogPath = std::filesystem::weakly_canonical(dbPath_, pathError);
     if (pathError) return PersistResult::Failed;
@@ -3368,12 +3374,13 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace,
         return writer.contended() ? PersistResult::Busy : PersistResult::Failed;
     std::lock_guard<std::mutex> lock(mutex_);
     std::lock_guard<std::mutex> publicationLock(persistence_->publication->mutex);
-    auto images = serializeAllLocked(namespacesOnly);
-    // A namespace-only write still checks the entire generation. The full
+    auto images = serializeAllLocked(scope);
+    const bool scoped = scope != WriteScope::All;
+    // A scoped write still checks the entire generation. The full
     // publisher owns missing-file repair and peer reload, if either is needed.
-    if (namespacesOnly && !persistence_->baseline.count("namespace"))
+    if (scoped && !persistence_->baseline.count(images.begin()->first))
         return PersistResult::RefreshRequired;
-    const auto& catalogFiles = namespacesOnly ? persistence_->baseline : images;
+    const auto& catalogFiles = scoped ? persistence_->baseline : images;
     std::map<std::string, CatalogFileGeneration> current;
     bool peerChanged = false;
     bool missingImage = false;
@@ -3404,7 +3411,7 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace,
 #if defined(__linux__) && defined(O_PATH)
     if (useDirectoryFd && !directory.stillNamesDirectory()) return PersistResult::Failed;
 #endif
-    if (namespacesOnly && (peerChanged || missingImage)) return PersistResult::RefreshRequired;
+    if (scoped && (peerChanged || missingImage)) return PersistResult::RefreshRequired;
     if (peerChanged) {
         // No cross-cache merge is implied: retain unsaved local changes on a
         // conflict, rather than silently publishing over newer peer metadata.

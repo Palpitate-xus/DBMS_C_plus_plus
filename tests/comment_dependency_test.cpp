@@ -112,6 +112,26 @@ int main() {
                "integer comment");
     }
 
+    assert(g_engine.beginTransaction(database) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql("COMMENT ON TABLE notes IS 'outer comment'", session));
+    assert(!g_engine.hasTransactionBackup());
+    assert(fs::is_regular_file(g_engine.dbPath(database) / ".create_table_undo" / "catalog"));
+    assert(g_engine.getTableComment(database, "notes") == "outer comment");
+    assert(g_engine.savepoint("after_first_comment") == dbms::DBStatus::OK);
+    assert(!ddl.executeSql("COMMENT ON TABLE notes IS 'inner comment'", session));
+    assert(!ddl.executeSql("COMMENT ON COLUMN notes.body IS NULL", session));
+    assert(!g_engine.hasTransactionBackup());
+    assert(g_engine.rollbackToSavepoint("after_first_comment") == dbms::DBStatus::OK);
+    assert(g_engine.getTableComment(database, "notes") == "outer comment");
+    assert(g_engine.getColumnComment(database, "notes", "body") == "column comment");
+    assert(g_engine.catalogService().get(database).getDescription(tableOid, dbms::PgClassOid_Class, 0) ==
+           "outer comment");
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(!fs::exists(g_engine.dbPath(database) / ".create_table_undo"));
+    assert(g_engine.getTableComment(database, "notes") == "table comment");
+    assert(g_engine.catalogService().get(database).getDescription(tableOid, dbms::PgClassOid_Class, 0) ==
+           "table comment");
+
     // PostgreSQL treats an empty SQL comment as a request to delete the row.
     assert(!ddl.executeSql("COMMENT ON TABLE notes IS ''", session));
     {

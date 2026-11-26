@@ -74,10 +74,30 @@ def check(client, sock, reference):
     assert client.data_row_values(frames) == [[b'schema details']], frames
     assert [(field[3], field[-1]) for field in client.row_description_fields(frames)] == [(25, 1)], frames
 
+    def table_note(expected, ready=b'T'):
+        wire.query(f"SELECT obj_description('{table}'::oid) AS note", rows=[(expected,)],
+                   fields=[('note', 25)], ready=ready)
+
     wire.command('BEGIN', 'BEGIN', ready=b'T')
+    wire.command('SAVEPOINT before_comment', 'SAVEPOINT', ready=b'T')
     wire.command("COMMENT ON TABLE comment_lookup.notes IS 'pending'", 'COMMENT', ready=b'T')
-    wire.query(f"SELECT obj_description('{table}'::oid) AS note", rows=[('pending',)], fields=[('note', 25)], ready=b'T')
+    table_note('pending')
+    wire.command("COMMENT ON COLUMN comment_lookup.notes.body IS NULL", 'COMMENT', ready=b'T')
+    wire.command('ROLLBACK TO before_comment', 'ROLLBACK', ready=b'T')
+    wire.query(catalog, rows=rows, fields=fields, tag='SELECT 2', ready=b'T')
+    wire.command("COMMENT ON TABLE comment_lookup.notes IS 'pending before index'", 'COMMENT', ready=b'T')
+    wire.command('CREATE INDEX pending_note_index ON comment_lookup.notes(id)', 'CREATE INDEX', ready=b'T')
+    wire.command("COMMENT ON TABLE comment_lookup.notes IS 'pending after index'", 'COMMENT', ready=b'T')
+    table_note('pending after index')
+    wire.command('ROLLBACK TO before_comment', 'ROLLBACK', ready=b'T')
+    wire.query(catalog, rows=rows, fields=fields, tag='SELECT 2', ready=b'T')
+    wire.command('CREATE TABLE comment_lookup.pending_note(k integer)', 'CREATE TABLE', ready=b'T')
+    wire.command("COMMENT ON TABLE comment_lookup.pending_note IS 'new table comment'", 'COMMENT', ready=b'T')
+    wire.command("COMMENT ON TABLE comment_lookup.notes IS 'pending'", 'COMMENT', ready=b'T')
+    table_note('pending')
     wire.command('ROLLBACK', 'ROLLBACK')
+    table_note('table details', ready=b'I')
+    wire.query('SELECT * FROM comment_lookup.pending_note', state='42P01', tag=None)
     wire.command('ALTER TABLE comment_lookup.notes RENAME COLUMN body TO content', 'ALTER TABLE')
     wire.command('ALTER TABLE comment_lookup.notes RENAME TO journal', 'ALTER TABLE')
     wire.query(catalog, rows=rows, fields=fields, tag='SELECT 2')

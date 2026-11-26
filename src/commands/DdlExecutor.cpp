@@ -14223,13 +14223,6 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
-    DdlTransaction txn(s);
-    txn.enableSnapshotRollback();
-    if (!txn.begin()) {
-        std::cout << "DDL transaction begin failed" << std::endl;
-        return true;
-    }
-
     const std::string objType = toLower(stmt->objectType);
     if (objType == "unknown" || objType == "function" ||
         objType == "procedure") {
@@ -14256,6 +14249,40 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
     }
     if (searchPath.empty()) searchPath.push_back("public");
 
+    DdlTransaction txn(s);
+    bool useSnapshot = g_engine.hasTransactionBackup();
+    if (useSnapshot) txn.enableSnapshotRollback();
+    if (!txn.begin() || (!useSnapshot && !g_engine.beginCreateTableUndo(s.currentDB))) {
+        std::cout << "DDL transaction begin failed (SQLSTATE 58030)" << std::endl;
+        return true;
+    }
+    struct RestoreFailedComment {
+        std::function<bool()> undo;
+        ~RestoreFailedComment() {
+            if (!undo) return;
+            try {
+                if (!undo()) (void)g_engine.rollbackTransaction();
+            } catch (...) {
+                try { (void)g_engine.rollbackTransaction(); } catch (...) {}
+            }
+        }
+    } restore;
+    const auto protectWrite = [&](bool compatibilityFile) {
+        if (useSnapshot) {
+            txn.markSnapshotDirty();
+            return;
+        }
+        restore.undo = g_engine.prepareCommentUndo(s.currentDB, compatibilityFile);
+        if (!restore.undo) {
+            if (!txn.enableSnapshotRollback())
+                throw DbError("58030", "could not save comment files before modifying them");
+            useSnapshot = true;
+            txn.markSnapshotDirty();
+            return;
+        }
+        g_engine.registerDdlUndo(restore.undo);
+    };
+
     // Temporary relations are currently session-owned storage objects and do
     // not yet have pg_class rows.  Retain their existing lifecycle-aware
     // sidecar path, but never use it as a fallback for a permanent relation
@@ -14274,7 +14301,7 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
             if (sessionTemporary) {
                 const std::string physicalName =
                     tempTablePrefix(s, temporaryName.name);
-                txn.markSnapshotDirty();
+                protectWrite(true);
                 const DBStatus status = objType == "table"
                     ? g_engine.commentOnTable(
                           s.currentDB, physicalName,
@@ -14292,6 +14319,7 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
                 txn.recordUpdate(
                     DdlObjectKind::Table, physicalName,
                     objType == "column" ? stmt->columnName : std::string());
+                restore.undo = {};
                 if (!txn.commit()) return true;
                 std::cout << "COMMENT" << std::endl;
                 return false;
@@ -14343,6 +14371,10 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
                                   << std::endl;
                         return true;
                     }
+                    // Legacy heap registration changes other catalog families.
+                    if (!useSnapshot && !txn.enableSnapshotRollback())
+                        throw DbError("58030", "could not save the legacy relation catalog before migration");
+                    useSnapshot = true;
                     txn.markSnapshotDirty();
                     registerTableInCatalog(
                         *catalog, table, logicalSchema, logicalName.name);
@@ -14494,7 +14526,7 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
         return true;
     }
 
-    txn.markSnapshotDirty();
+    protectWrite(writeTableCompatibilityComment || writeColumnCompatibilityComment);
     if (writeTableCompatibilityComment || writeColumnCompatibilityComment) {
         const std::string compatibilityComment =
             stmt->isNull ? std::string() : stmt->comment;
@@ -14520,12 +14552,13 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
         catalog->setDescription(
             objectOid, classOid, objectSubId, stmt->comment);
     }
-    if (!catalog->persistAll()) {
+    if (!(useSnapshot ? catalog->persistAll() : catalog->persistDescriptions())) {
         std::cout << "ERROR: COMMENT catalog persistence failed "
                      "(SQLSTATE 58030)" << std::endl;
         return true;
     }
     txn.recordUpdate(ddlKind, ddlName, ddlExtra);
+    restore.undo = {};
     if (!txn.commit()) return true;
     std::cout << "COMMENT" << std::endl;
     return false;

@@ -308,6 +308,7 @@ public:
     // On a checked catalog generation, publish namespace rows only.
     // Other pending rows remain owned by their original caller.
     bool persistNamespaces();
+    bool persistDescriptions();
     void loadAll();
     enum class PublicationState { Current, CleanPeerChange, Conflict };
     // Pure serialized-model/generation check. This does not reload rows or
@@ -453,8 +454,9 @@ private:
 
     // 辅助函数
     std::string catalogFilePath(const std::string& tablename) const;
-    std::map<std::string, std::string> serializeAllLocked(bool namespacesOnly = false) const;
-    PersistResult persistAllImpl(bool reloadInPlace, bool namespacesOnly = false);
+    enum class WriteScope { All, Namespaces, Descriptions };
+    std::map<std::string, std::string> serializeAllLocked(WriteScope scope = WriteScope::All) const;
+    PersistResult persistAllImpl(bool reloadInPlace, WriteScope scope = WriteScope::All);
     void loadAllLocked();
     void rebuildIndexes();
     static std::string classNameKey(Oid nspOid, const std::string& relname);

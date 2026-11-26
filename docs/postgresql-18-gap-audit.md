@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 保存注释时只备份相关文件
+
+对已有目录编号的对象，`COMMENT ON` 用文件级恢复日志保护注释写入。保存点记录本次修改前的注释文件，重启用事务开始写入前的记录恢复。与建表或需要完整备份的目录写入混合时仍使用对应恢复流程。`CAT-03`、`MON-01` 和 `WAL-08` 维持部分实现。 [回滚测试](test-report.md#comment-file-undo-20261126) · [性能报告](performance-report-2026-10-30.md#comment-file-undo-cost-20261126)
+
 ## 2026-11-26 · 从 SQL 读取对象注释
 
 `pg_description` 提供四个有类型的字段，`obj_description` 和 `col_description` 读取已保存的对象或列注释。按明确的对象编号查目录时只构造匹配行，旧目录中的带引号多行注释可以按原格式读取。`MON-01` 转为部分实现，`CAT-03` 和 `CLIENT-01` 继续为部分实现。预置系统注释和共享对象注释还有缺口。 [测试报告](test-report.md#object-description-20261126) · [性能对照](performance-report-2026-10-30.md#object-description-cost-20261126)
