@@ -6001,6 +6001,46 @@ DBStatus StorageEngine::createView(const std::string& dbname,
     return persistMetadata(viewPath(dbname, viewname), sql);
 }
 
+DBStatus StorageEngine::renameView(const std::string& dbname,
+                                   const std::string& oldName,
+                                   const std::string& newName,
+                                   const std::function<void()>& prepareUndo) {
+    if (!prepareUndo) return DBStatus::INVALID_ARGUMENT;
+    if (!validMetadataObjectName(oldName) || !validMetadataObjectName(newName))
+        return DBStatus::INVALID_VALUE;
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
+    const auto source = viewPath(dbname, oldName);
+    const auto destination = viewPath(dbname, newName);
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(source, error)) || error)
+        return DBStatus::IO_ERROR;
+    if (pathEntryExists(destination, error)) return DBStatus::TABLE_ALREADY_EXISTS;
+    if (error) return DBStatus::IO_ERROR;
+
+    std::vector<Trigger> triggers;
+    if (!loadTriggers(dbname, triggers)) return DBStatus::CORRUPTED_DATA;
+    // Older DROP VIEW could leave triggers addressed by the old filename.
+    // No view owns the unused destination, so do not attach those records
+    // to the live view. Leave non-view trigger records alone.
+    const size_t priorCount = triggers.size();
+    triggers.erase(std::remove_if(triggers.begin(), triggers.end(), [&](const Trigger& trigger) {
+        return trigger.timing == "instead of" && trigger.tableName == newName;
+    }), triggers.end());
+    bool changedTriggers = triggers.size() != priorCount;
+    for (auto& trigger : triggers) {
+        if (trigger.timing != "instead of" || trigger.tableName != oldName) continue;
+        trigger.tableName = newName;
+        changedTriggers = true;
+    }
+
+    prepareUndo();
+    if (!renameTablespaceEntryNoReplace(source, destination, error))
+        return error == std::errc::file_exists ? DBStatus::TABLE_ALREADY_EXISTS : DBStatus::IO_ERROR;
+    if (!index_file::syncDirectory(destination.parent_path())) return DBStatus::IO_ERROR;
+    return changedTriggers ? persistTriggers(dbname, triggers) : DBStatus::OK;
+}
+
 DBStatus StorageEngine::dropView(const std::string& dbname,
                                   const std::string& viewname) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;

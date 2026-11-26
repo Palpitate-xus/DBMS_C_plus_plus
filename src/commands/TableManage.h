@@ -272,6 +272,8 @@ public:
 
     // View support
     DBStatus createView(const std::string& dbname, const std::string& viewname, const std::string& sql);
+    DBStatus renameView(const std::string& dbname, const std::string& oldName,
+                        const std::string& newName, const std::function<void()>& prepareUndo);
     DBStatus dropView(const std::string& dbname, const std::string& viewname);
     bool viewExists(const std::string& dbname, const std::string& viewname) const;
     std::string getViewSQL(const std::string& dbname, const std::string& viewname) const;

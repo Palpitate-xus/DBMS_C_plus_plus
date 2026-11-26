@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 rename ordinary views with their dependencies",
+      "gap_ids": ["CAT-16", "SQL-11", "TXN-05"],
+      "status": "partial",
+      "evidence": ["src/commands/DdlExecutor.cpp", "src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/alter_view_rename_protocol_e2e_test.py", "tests/compat/cases/rename_table_view_sources.sql", "tests/compat/cases/rename_schema_with_views.sql"],
+      "verification": [
+        "Compare renames, missing relations, wrong relation types, collisions and ownership with PostgreSQL 18.6 in both wire protocols.",
+        "Check object identity, comments, view dependencies, triggers, savepoints and recovery after stopping midway through publication.",
+        "Compare successful renames and rejected or skipped statements at two database sizes."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 copy and seal transaction rollback files together",
       "gap_ids": ["BACKUP-01", "BACKUP-02", "TXN-05", "WAL-07"],
       "status": "partial",

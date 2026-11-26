@@ -315,6 +315,14 @@ FROM orders GROUP BY DATE(created_at);
 
 ---
 
+### ALTER VIEW
+
+```sql
+ALTER VIEW [IF EXISTS] view_name RENAME TO new_name;
+```
+
+新名字仍在原来的模式里。视图的注释和依赖关系会保留。带 `IF EXISTS` 时，数据库会提示并跳过缺失的视图。 [使用手册](MANUAL.md#9-视图与物化视图)
+
 ### DROP VIEW
 
 **语法**

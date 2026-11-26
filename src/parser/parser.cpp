@@ -82,6 +82,7 @@ static std::string joinSqlTokens(const std::vector<std::string>& tokens) {
     std::string out;
     auto isIdent = [](const std::string& s) {
         if (s.empty()) return false;
+        if (s.front() == '"') return s.size() >= 2 && s.back() == '"';
         for (char c : s) {
             if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') return false;
         }
@@ -12706,18 +12707,32 @@ StmtPtr SQLParser::parseAlterView(const std::vector<std::string>& tokens, size_t
     if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
         stmt->ifExists = true; pos += 2;
     }
-    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
-        stmt->only = true; ++pos;
+    if (match(tokens, pos, "only") ||
+        !parseQualifiedIdentifier(tokens, pos, stmt->objectName, true) ||
+        pos == tokens.size() || tokens[pos] == ";") return nullptr;
+    if (match(tokens, pos, "rename") && match(tokens, pos + 1, "to")) {
+        pos += 2;
+        const size_t start = pos;
+        std::string name;
+        if (!parseQualifiedIdentifier(tokens, pos, name, true) || pos != start + 1 ||
+            (name.front() != '"' && identifierKeywordKind(toLower(name)) > 1)) return nullptr;
+        if (pos < tokens.size() && tokens[pos] == ";") ++pos;
+        if (pos != tokens.size()) return nullptr;
+        stmt->subCommand = "RENAME TO " + name;
+        return stmt;
     }
-    if (pos < tokens.size()) {
-        stmt->objectName = tokens[pos++];
-        if (pos < tokens.size() && tokens[pos] == ".") {
-            ++pos;
-            if (pos < tokens.size()) {
-                stmt->schema = stmt->objectName;
-                stmt->objectName = tokens[pos++];
-            }
-        }
+    if (match(tokens, pos, "rename")) {
+        auto at = pos + 1;
+        if (match(tokens, at, "column")) ++at;
+        const auto column = at;
+        std::string name;
+        if (!parseQualifiedIdentifier(tokens, at, name, true) ||
+            at != column + 1 || !match(tokens, at, "to")) return nullptr;
+        const auto target = ++at;
+        if (!parseQualifiedIdentifier(tokens, at, name, true) || at != target + 1)
+            return nullptr;
+        if (at < tokens.size() && tokens[at] == ";") ++at;
+        if (at != tokens.size()) return nullptr;
     }
     std::string rest;
     while (pos < tokens.size() && tokens[pos] != ";") {

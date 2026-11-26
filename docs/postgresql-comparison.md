@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 普通视图改名
+
+PostgreSQL 修改目录中的关系名称和该视图的行类型名，其他对象继续按编号引用它。DuckDB 的视图改名随事务提交或回滚，依赖该视图的定义需要单独更新。SQLite 的 `ALTER TABLE` 改名适用于表。 [PostgreSQL ALTER VIEW](https://www.postgresql.org/docs/18/sql-alterview.html) · [PostgreSQL 改名实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L4022-L4102) · [DuckDB ALTER VIEW](https://duckdb.org/docs/current/sql/statements/alter_view) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html)
+
+本项目保留视图的目录编号，并把依赖它的普通视图写成指向新名字的查询。支持的触发器随视图改名。真正改名仍需整库回滚备份，视图的行类型尚未实现。 [功能测试](test-report.md#alter-view-rename-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-rename-cost-20261126)
+
 ## 2026-11-26 · 回滚备份少读一遍文件
 
 PostgreSQL 的物理备份在传输文件时更新校验值，并默认等备份写入磁盘。SQLite 的在线备份按页复制，可以分次进行。DuckDB 通过检查点把日志中的写入合入数据库文件。 [PostgreSQL 备份实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/backup/basebackup.c#L1659-L1668) · [PostgreSQL 备份落盘](https://www.postgresql.org/docs/18/app-pgbasebackup.html) · [SQLite 在线备份](https://www.sqlite.org/backup.html) · [DuckDB 检查点](https://duckdb.org/docs/1.5/sql/statements/checkpoint)

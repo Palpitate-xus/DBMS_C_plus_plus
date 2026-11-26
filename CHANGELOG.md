@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以给视图改名 · 2026-11-26</summary>
+
+用 `ALTER VIEW` 改名后，依赖这个视图的查询仍能运行，原有注释也会保留。
+
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#alter-view-rename-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-rename-cost-20261126)
+
+</details>
+
+<details>
 <summary>改表时少读一遍备份文件 · 2026-11-26</summary>
 
 在额外建了 128 张表的磁盘测试中，改表名的时间从约 1.8 秒缩短到约 1.1 秒。
@@ -21,16 +30,13 @@
 </details>
 
 <details>
-<summary>改表名时更快发现重名 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 改表名时更快发现重名
 
 在额外建了 32 张表的磁盘测试中，发现表名已被占用的时间从约 2 秒缩短到约 40 毫秒。
 
 [用法](docs/MANUAL.md#修改表) · [测试报告](docs/test-report.md#rename-name-checks-20261126) · [性能报告](docs/performance-report-2026-10-30.md#rename-name-checks-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 磁盘上的表改名更快
 

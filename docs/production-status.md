@@ -6,6 +6,10 @@
 
 截至 2026-11-26，273 项功能要求中有 22 项完成、170 项部分实现、66 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-26 · 可以给普通视图改名
+
+`ALTER VIEW [IF EXISTS] ... RENAME TO` 保留视图的编号、注释及触发器，依赖它的普通视图会继续读取同一个对象。保存点回滚和进程中途终止后的恢复已验证。更换视图所在的模式属于另一项功能。 [用法](MANUAL.md#9-视图与物化视图) · [功能测试](test-report.md#alter-view-rename-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-rename-cost-20261126)
+
 ## 2026-11-26 · 回滚备份少读一遍文件
 
 改表等命令需要生成整库回滚备份时，数据库在复制顶层普通文件的同时校验并同步。源目录下的子目录继续单独处理，备份格式未变。两版程序均能从对方留下的事务备份恢复。 [功能测试](test-report.md#transaction-backup-copy-20261126) · [性能报告](performance-report-2026-10-30.md#transaction-backup-copy-cost-20261126)

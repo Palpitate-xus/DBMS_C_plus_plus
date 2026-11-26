@@ -25403,42 +25403,19 @@ static bool executeInternal(const string& rawSql, Session& s,
             return false;
         }
         if (tokens[0] == "view") {
-            // ALTER VIEW viewname RENAME TO newname
-            // ALTER VIEW viewname SET SCHEMA dbname
+            // PostgreSQL view renames are owned by the DDL executor. This
+            // branch retains the extended-mode database move syntax.
             if (!checkDB(s)) return true;
             if (tokens.size() < 5) {
-                cout << "SQL syntax error: ALTER VIEW name RENAME TO newname / SET SCHEMA dbname" << endl;
+                cout << "SQL syntax error: ALTER VIEW name SET SCHEMA dbname" << endl;
                 return true;
             }
             string vname = tokens[1];
             // Resolve schema-qualified view name
             size_t dotPos = vname.find('.');
             string actualVname = (dotPos != string::npos) ? vname.substr(dotPos + 1) : vname;
-            if (tokens[2] == "rename" && tokens[3] == "to") {
-                string newName = tokens[4];
-                if (!g_engine.viewExists(s.currentDB, actualVname)) {
-                    cout << "View " << actualVname << " not exist" << endl;
-                    return true;
-                }
-                if (g_engine.viewExists(s.currentDB, newName)) {
-                    cout << "View " << newName << " already exists" << endl;
-                    return true;
-                }
-                // Read view SQL, drop old, create new with new name
-                string viewSql = g_engine.getViewSQL(s.currentDB, actualVname);
-                string checkOpt = g_engine.getViewCheckOption(s.currentDB, actualVname);
-                g_engine.dropView(s.currentDB, actualVname);
-                auto res = g_engine.createView(s.currentDB, newName, viewSql);
-                if (res != DBStatus::OK) {
-                    // Restore old view
-                    g_engine.createView(s.currentDB, actualVname, viewSql);
-                    cout << "Rename view failed" << endl;
-                    return true;
-                }
-                cout << "View renamed" << endl;
-                return false;
-            }
-            if (tokens[2] == "set" && tokens[3] == "schema") {
+            if (dbms::isExtendedCompatMode(s.compatibilityMode) &&
+                tokens[2] == "set" && tokens[3] == "schema") {
                 string targetDb = tokens[4];
                 if (!g_engine.databaseExists(targetDb)) {
                     cout << "Database " << targetDb << " not exist" << endl;
@@ -25455,7 +25432,7 @@ static bool executeInternal(const string& rawSql, Session& s,
                 cout << "View schema changed" << endl;
                 return false;
             }
-            cout << "SQL syntax error: ALTER VIEW name RENAME TO newname / SET SCHEMA dbname" << endl;
+            cout << "SQL syntax error: ALTER VIEW name SET SCHEMA dbname" << endl;
             return true;
         }
         if (!checkDB(s)) return true;
@@ -25489,6 +25466,38 @@ static bool executeInternal(const string& rawSql, Session& s,
         }
         string tname = tokens[0];
         string resolvedName = resolveTableName(s, tname);
+        // The fallback still executes view triggers. Resolve its target from
+        // the original SQL so quotes and schema spelling reach that path.
+        const auto insertTarget = [&](const string& input, size_t& begin, size_t& end,
+                                      string& spelling) {
+            string word;
+            size_t cursor = dbms::skipLeadingSqlTrivia(input);
+            if (!readLateralIdentifier(input, cursor, word) || word != "insert") return false;
+            cursor = dbms::skipLeadingSqlTrivia(input, cursor);
+            if (!readLateralIdentifier(input, cursor, word) || word != "into") return false;
+            begin = end = dbms::skipLeadingSqlTrivia(input, cursor);
+            if (!readLateralIdentifier(input, end, word)) return false;
+            spelling = input.substr(begin, end - begin);
+            const size_t dot = dbms::skipLeadingSqlTrivia(input, end);
+            if (dot >= input.size() || input[dot] != '.') return true;
+            const size_t component = dbms::skipLeadingSqlTrivia(input, dot + 1);
+            end = component;
+            if (!readLateralIdentifier(input, end, word)) return false;
+            spelling += "." + input.substr(component, end - component);
+            return true;
+        };
+        size_t rawTargetBegin = 0, rawTargetEnd = 0, afterTarget = 12;
+        bool ordinaryView = false;
+        string spelling;
+        if (!isReplace && insertTarget(effectiveRawSql, rawTargetBegin, rawTargetEnd, spelling)) {
+            auto target = resolveTableName(s, spelling, true, &ordinaryView);
+            if (ordinaryView) {
+                tname = resolvedName = std::move(target);
+                size_t normalizedBegin = 0, normalizedEnd = 0;
+                if (insertTarget(sql, normalizedBegin, normalizedEnd, spelling))
+                    afterTarget = normalizedEnd;
+            }
+        }
         // Check for INSTEAD OF triggers on view (takes precedence over base table rewriting)
         if (!g_engine.tableExists(s.currentDB, resolvedName) &&
             g_engine.viewExists(s.currentDB, tname)) {
@@ -25498,7 +25507,7 @@ static bool executeInternal(const string& rawSql, Session& s,
                 cout << "Trigger metadata is corrupt or unreadable" << endl;
                 return true;
             }
-            size_t valuesPos = sql.find("values");
+            size_t valuesPos = sql.find("values", afterTarget);
             if (!viewTriggers.empty() && valuesPos != string::npos) {
                 size_t firstValStart = sql.find('(', valuesPos);
                 size_t firstValEnd = (firstValStart != string::npos)
@@ -25524,7 +25533,7 @@ static bool executeInternal(const string& rawSql, Session& s,
                     }
 
                     vector<string> columns;
-                    size_t colStart = sql.find('(', 12);
+                    size_t colStart = sql.find('(', afterTarget);
                     if (colStart != string::npos && colStart < firstValStart) {
                         size_t colEnd = sql.find(')', colStart);
                         if (colEnd != string::npos && colEnd < firstValStart) {
@@ -25615,17 +25624,18 @@ static bool executeInternal(const string& rawSql, Session& s,
             if (!viewBaseTable.empty()) {
                 // Rewrite SQL to use base table
                 string rewritten = effectiveRawSql;
-                size_t pos = rewritten.find(tname);
+                const size_t pos = ordinaryView ? rawTargetBegin : rewritten.find(tname);
+                const size_t end = ordinaryView ? rawTargetEnd : pos + tname.size();
                 if (pos != string::npos) {
-                    rewritten = rewritten.substr(0, pos) + viewBaseTable + rewritten.substr(pos + tname.size());
+                    rewritten.replace(pos, end - pos, viewBaseTable);
                     if (!viewCheckOpt.empty()) {
                         // Pre-validate WITH CHECK OPTION for INSERT INTO ... VALUES
-                        size_t valuesPos = sql.find("values");
-                        size_t selectPos = sql.find("select");
+                        size_t valuesPos = sql.find("values", afterTarget);
+                        size_t selectPos = sql.find("select", afterTarget);
                         bool isValuesInsert = (valuesPos != string::npos);
                         bool isSelectInsert = (selectPos != string::npos);
                         if (isValuesInsert && !isSelectInsert) {
-                            size_t colStart = sql.find('(', 12);
+                            size_t colStart = sql.find('(', afterTarget);
                             size_t colEnd = sql.find(')', colStart);
                             size_t valStart = sql.find('(', colEnd);
                             size_t valEnd = findMatchingParen(sql, valStart);

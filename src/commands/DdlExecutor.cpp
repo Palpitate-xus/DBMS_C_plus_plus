@@ -2224,6 +2224,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeDropType(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateView:
             return executeCreateView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
+        case SqlCommand::AlterView:
+            return executeAlterView(dynamic_cast<const AlterObjectStmt*>(stmt.get()), s);
         case SqlCommand::DropView:
             return executeDropView(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateTrigger:
@@ -2288,7 +2290,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
 bool DdlExecutor::executeSql(const std::string& sql, Session& s) {
     SQLParser parser;
     const auto command=SQLParser::classify(sql);
-    ParseResult r = command==SqlCommand::AlterTable || command==SqlCommand::CreateTable
+    ParseResult r = command==SqlCommand::AlterTable || command==SqlCommand::CreateTable ||
+                    command==SqlCommand::AlterView
         ? parser.parseForBinding(sql) : parser.parse(sql);
     if (!r.success || !r.stmt) {
         std::cout << "SQL syntax error";
@@ -2324,6 +2327,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::CreateType:
         case dbms::SqlCommand::DropType:
         case dbms::SqlCommand::CreateView:
+        case dbms::SqlCommand::AlterView:
         case dbms::SqlCommand::DropView:
         case dbms::SqlCommand::CreateTrigger:
         case dbms::SqlCommand::DropTrigger:
@@ -2376,6 +2380,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         parsedCmd == dbms::SqlCommand::DropProcedure ||
         parsedCmd == dbms::SqlCommand::DropRoutine ||
         parsedCmd == dbms::SqlCommand::CreateView ||
+        parsedCmd == dbms::SqlCommand::AlterView ||
         parsedCmd == dbms::SqlCommand::AlterSchema ||
         parsedCmd == dbms::SqlCommand::AlterTable ||
         parsedCmd == dbms::SqlCommand::CreateTable;
@@ -2393,7 +2398,17 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         std::cout << " (SQLSTATE 42601)" << std::endl;
         return true;
     }
-    if (parsedCmd == dbms::SqlCommand::AlterTable) {
+    if (r.stmt->command == dbms::SqlCommand::AlterView &&
+        dbms::isExtendedCompatMode(s.compatibilityMode)) {
+        const auto* view = dynamic_cast<const dbms::AlterObjectStmt*>(r.stmt.get());
+        const auto words = view ? dbms::SQLParser::tokenize(view->subCommand)
+                                : std::vector<std::string>{};
+        if (words.size() == 3 && toLower(words[0]) == "set" && toLower(words[1]) == "schema") {
+            handled = false;
+            return false;
+        }
+    }
+    if (parsedCmd == dbms::SqlCommand::AlterTable && r.stmt->command != dbms::SqlCommand::AlterView) {
         const auto* alter = dynamic_cast<const dbms::AlterTableStmt*>(r.stmt.get());
         bool supported = alter && !alter->subCommands.empty();
         if (supported) {
@@ -11661,8 +11676,8 @@ static std::vector<ViewRenamePlan> planViewSourceRenames(
             if (!inserted && entry->second != replacement)
                 throw DbError("0A000", "view relation reference rewrite is ambiguous");
         };
-        std::set<std::string> usedNames;
-        for (const auto& source : prepared.sourceRanges) usedNames.insert(source.name);
+        std::map<std::string, size_t> usedNames;
+        for (const auto& source : prepared.sourceRanges) ++usedNames[source.name];
         std::optional<std::vector<bool>> protectedBytes;
         std::map<size_t, std::string> qualifiers;
         for (const auto& source : prepared.sourceRanges) {
@@ -11675,17 +11690,24 @@ static std::vector<ViewRenamePlan> planViewSourceRenames(
             auto end = item->tableNameEnd;
             auto replacement = target;
             if (item->alias.empty()) {
-                auto qualifier = target;
-                if (newName != source.relationName && usedNames.count(newName)) {
+                // Keep a single relation qualifier on column references.
+                // The FROM item identifies the schema, and a generated
+                // alias distinguishes sources with the same bare name.
+                auto qualifier = quote(newName);
+                const auto occupied = usedNames.find(newName);
+                if (occupied != usedNames.end() &&
+                    (newName != source.relationName || occupied->second > 1)) {
                     if (item->tableNameBegin >= end || end > plan.query.size())
                         throw DbError("0A000", "view table alias has no source position");
                     auto alias = "__view_source_" + std::to_string(source.ordinal);
-                    while (!usedNames.insert(alias).second) alias += '_';
+                    while (!usedNames.emplace(alias, 1).second) alias += '_';
                     qualifier = quote(alias);
                     if (!protectedBytes) protectedBytes = sqlProtectedBytes(plan.query);
                     end = viewTableAliasPosition(plan.query, *item, *protectedBytes);
                     replacement += plan.query.substr(item->tableNameEnd, end - item->tableNameEnd) +
                         " AS " + qualifier;
+                } else if (newName != source.relationName) {
+                    ++usedNames[newName];
                 }
                 qualifiers.emplace(source.ordinal, std::move(qualifier));
             }
@@ -12592,6 +12614,142 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
               << (checkOption.empty() ? "" : " [with check option " + checkOption + "]")
               << std::endl;
     return false;
+}
+
+// ----------------------------------------------------------------------------
+// ALTER VIEW
+// ----------------------------------------------------------------------------
+
+bool DdlExecutor::executeAlterView(const AlterObjectStmt* stmt, Session& s) {
+    if (!stmt) return rejectMalformedDdlAst();
+    if (!checkDB(s)) return true;
+    try {
+        CatalogManager::QualifiedName requested;
+        if (stmt->only || !CatalogManager::parseQualifiedName(stmt->objectName, requested))
+            throw DbError("42601", "invalid ALTER VIEW source name");
+        const auto tokens = SQLParser::tokenize(stmt->subCommand);
+        if (tokens.empty()) throw DbError("42601", "ALTER VIEW requires a subcommand");
+        if (toLower(tokens[0]) != "rename" ||
+            (tokens.size() > 1 && toLower(tokens[1]) != "to"))
+            throw DbError("0A000", "ALTER VIEW supports RENAME TO");
+        CatalogManager::QualifiedName destination;
+        if (tokens.size() != 3 || !CatalogManager::parseQualifiedName(tokens[2], destination) ||
+            !destination.schema.empty())
+            throw DbError("42601", "ALTER VIEW RENAME TO requires an unqualified name");
+
+        const std::string schema = requested.schema == "pg_temp"
+            ? activeTemporarySchema(&s) : requested.schema;
+        const bool admin = sessionIsAdmin(s);
+        const auto actor = effectiveSessionRole(s);
+        const auto owns = [&](Oid ownerOid) {
+            const auto owner = authCatalog().getAuthId(ownerOid);
+            return owner && (actor == owner->rolname || userHasRole(actor, owner->rolname));
+        };
+        const auto schemaDenied = [](const std::string& name) {
+            return DbError("42501", "permission denied for schema " + name);
+        };
+        const auto hasSchemaGrant = [&](const PgNamespaceRow& space, bool requireCreate) {
+            const auto key = "schema:" + space.nspname;
+            // Legacy permission files share table and schema spellings.
+            // A table owner or table grant cannot authorize a schema change.
+            if (g_engine.tableExists(s.currentDB, key)) return false;
+            const auto grants = g_engine.getUserPermissions(s.currentDB, key, actor);
+            return std::find(grants.begin(), grants.end(), "all") != grants.end() ||
+                (!requireCreate && std::find(grants.begin(), grants.end(), "usage") != grants.end());
+        };
+        const auto canUse = [&](const PgNamespaceRow& space) {
+            return admin || space.nspname == "public" || space.nspname == "pg_catalog" ||
+                space.nspname == activeTemporarySchema(&s) || owns(space.nspowner) ||
+                hasSchemaGrant(space, false);
+        };
+        const auto resolve = [&](CatalogManager& catalog) -> std::optional<PgClassRow> {
+            if (requested.schema.empty()) {
+                auto path = effectiveRelationSearchPath(&s);
+                if (!admin) {
+                    path.erase(std::remove_if(path.begin(), path.end(), [&](const std::string& name) {
+                        const auto space = catalog.getNamespaceByName(name);
+                        return !space || !canUse(*space);
+                    }), path.end());
+                }
+                return catalog.resolveRelationSnapshot(stmt->objectName, path);
+            }
+            const auto space = catalog.getNamespaceByName(schema);
+            if (space) {
+                if (!canUse(*space)) throw schemaDenied(space->nspname);
+                return catalog.getClassByName(requested.name, space->oid);
+            }
+            if (!stmt->ifExists)
+                throw DbError("3F000", "schema \"" + requested.schema + "\" does not exist");
+            return std::nullopt;
+        };
+        const auto skipMissing = [&]() {
+            emitNotice("relation \"" + requested.name + "\" does not exist, skipping");
+            return false;
+        };
+        // A missing IF EXISTS target can be skipped at lookup time. A
+        // surviving target is resolved again under exclusive DDL ownership.
+        if (stmt->ifExists &&
+            !resolve(g_engine.catalogService().get(s.currentDB))) return skipMissing();
+
+        DdlTransaction txn(s);
+        txn.enableSnapshotRollback();
+        if (!txn.begin(DdlTransaction::SnapshotTiming::BeforeChange))
+            throw DbError("58030", "could not start ALTER VIEW");
+        auto& catalog = g_engine.catalogService().get(s.currentDB);
+        const auto relation = resolve(catalog);
+        if (!relation) {
+            if (!stmt->ifExists)
+                throw DbError("42P01", "relation \"" + stmt->objectName + "\" does not exist");
+            if (!txn.commit()) return true;
+            return skipMissing();
+        }
+        if (relation->relkind != 'v')
+            throw DbError("42809", "\"" + requested.name + "\" is not a view");
+        if (!admin && !owns(relation->relowner))
+            throw DbError("42501", "must be owner of view " + requested.name);
+
+        const auto space = catalog.getNamespace(relation->relnamespace);
+        if (!space) throw DbError("XX001", "view namespace is missing");
+        if (space->nspname == "pg_catalog")
+            throw DbError("42501", "permission denied: cannot rename a system view");
+        // The current schema grant model stores CREATE in its ALL grant.
+        if (!admin && !owns(space->nspowner) && !hasSchemaGrant(*space, true))
+            throw schemaDenied(space->nspname);
+        const auto nameCollision = [&]() {
+            return DbError("42P07", "relation \"" + destination.name + "\" already exists");
+        };
+        if (catalog.getClassByName(destination.name, space->oid)) throw nameCollision();
+        if (catalog.getTypeByName(destination.name, space->oid))
+            throw DbError("42710", "type \"" + destination.name + "\" already exists");
+
+        const auto prefix = space->nspname == "public" ? std::string{} : space->nspname + ".";
+        std::string from = prefix + relation->relname;
+        if (prefix.empty() && !g_engine.viewExists(s.currentDB, from) &&
+            g_engine.viewExists(s.currentDB, "public." + from)) from = "public." + from;
+        const auto to = prefix + destination.name;
+        const auto tableName = prefix.empty() ? destination.name : space->nspname + "__" + destination.name;
+        if (g_engine.tableExists(s.currentDB, tableName) || g_engine.isMaterializedView(s.currentDB, to) ||
+            (prefix.empty() && g_engine.viewExists(s.currentDB, "public." + destination.name)))
+            throw nameCollision();
+        auto plans = planViewSourceRename(catalog, s.currentDB, space->nspname,
+                                         relation->relname, space->nspname, destination.name);
+        const auto status = g_engine.renameView(s.currentDB, from, to, [&] {
+            if (!txn.prepareSnapshot())
+                throw DbError("58030", "could not save files before renaming view");
+            txn.markSnapshotDirty();
+        });
+        if (status == DBStatus::TABLE_ALREADY_EXISTS) throw nameCollision();
+        if (status != DBStatus::OK)
+            throw DbError(sqlstateForDBStatus(status), "could not rename view definition");
+        if (!catalog.renameClass(relation->oid, destination.name) || !catalog.persistAll())
+            throw DbError("58030", "could not save renamed view in the catalog");
+        publishDependentViewRenames(catalog, s.currentDB, plans, txn);
+        txn.recordUpdate(DdlObjectKind::View, from, to);
+        return !txn.commit();
+    } catch (const DbError& error) {
+        std::cout << "ERROR: " << error.what() << std::endl;
+        return true;
+    }
 }
 
 // ----------------------------------------------------------------------------

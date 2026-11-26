@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 普通视图改名
+
+`ALTER VIEW [IF EXISTS] ... RENAME TO` 保留普通视图的目录编号及注释，更新引用它的普通视图和触发器。改名失败或进程中途终止时可恢复旧名称和定义。视图自己的行类型、其他 `ALTER VIEW` 子命令及更细的对象锁仍有差距。`CAT-16`、`SQL-11` 和 `TXN-05` 保持部分实现。 [功能测试](test-report.md#alter-view-rename-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-rename-cost-20261126)
+
 ## 2026-11-26 · 复制时校验并同步回滚备份
 
 数据库目录顶层的普通文件在复制时计算校验值并同步，全部成功后才发布原格式的文件清单。进程停在文件同步和表清单写入前时均可恢复，旧版和新版也可以恢复对方留下的回滚备份。改表操作仍使用整库备份。`BACKUP-01`、`BACKUP-02`、`TXN-05` 和 `WAL-07` 维持部分实现。 [功能测试](test-report.md#transaction-backup-copy-20261126) · [性能报告](performance-report-2026-10-30.md#transaction-backup-copy-cost-20261126)
@@ -2361,7 +2365,7 @@ revalidation、其它sets、WALrewrite/PITR及所有剩余273内容继续。总�
 | `P` | `ALTER COLLATION`, `ALTER DATABASE`, `ALTER DEFAULT PRIVILEGES`, `ALTER DOMAIN`, `ALTER GROUP`, `ALTER POLICY`, `ALTER ROLE`, `ALTER SEQUENCE`, `ALTER STATISTICS`, `ALTER SYSTEM`, `ALTER TABLE`, `ALTER TABLESPACE`, `ALTER TYPE`, `ALTER USER` | 有具体 handler，但只覆盖选项子集；owner/ACL、依赖、并发锁、事务回滚、catalog 一致性和 PostgreSQL 错误语义不完整 |
 | `S` | `ALTER AGGREGATE`, `ALTER CONVERSION`, `ALTER EVENT TRIGGER`, `ALTER EXTENSION`, `ALTER FOREIGN DATA WRAPPER`, `ALTER FOREIGN TABLE`, `ALTER FUNCTION`, `ALTER INDEX`, `ALTER LANGUAGE`, `ALTER LARGE OBJECT`, `ALTER MATERIALIZED VIEW`, `ALTER OPERATOR`, `ALTER OPERATOR CLASS`, `ALTER OPERATOR FAMILY`, `ALTER PROCEDURE`, `ALTER PUBLICATION`, `ALTER ROUTINE`, `ALTER RULE`, `ALTER SERVER`, `ALTER SUBSCRIPTION`, `ALTER TEXT SEARCH CONFIGURATION`, `ALTER TEXT SEARCH DICTIONARY`, `ALTER TEXT SEARCH PARSER`, `ALTER TEXT SEARCH TEMPLATE`, `ALTER TRIGGER`, `ALTER USER MAPPING` | 多数只修改 `.pg_compat_objects` 定义/owner/name，未改变对应运行时能力 |
 | `P` | `ALTER SCHEMA` | 支持受测的用户 schema 改名。所有者变更、更多对象种类及权限规则仍待补齐 |
-| `X` | `ALTER VIEW` | parser 枚举存在，但当前主执行入口没有可确认的 PostgreSQL 语义实现 |
+| `P` | `ALTER VIEW` | 普通视图支持 `RENAME TO` 与 `IF EXISTS`。改列名、移动到其他模式、选项和视图行类型仍待补齐 |
 
 ### 5.2 CREATE 命令（42/42 已列）
 

@@ -5217,6 +5217,7 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     }
     if (startsWithSqlPhrase(sql, "alter default privileges")) return "ALTER DEFAULT PRIVILEGES";
     if (startsWithSqlPhrase(sql, "alter schema")) return "ALTER SCHEMA";
+    if (startsWithSqlPhrase(sql, "alter view")) return "ALTER VIEW";
     if (keyword == "create") {
         SQLParser parser;
         const auto parsed = parser.parseForBinding(sql);
@@ -5287,6 +5288,13 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     if (keyword == "insert") {
         for (const auto& line : lines) {
             if (line.rfind("INSERT ", 0) == 0) return line;
+            if (line.rfind("INSTEAD OF INSERT trigger executed on view ", 0) == 0) {
+                const auto count = line.rfind(" (");
+                if (count != std::string::npos) {
+                    if (const auto rows = mutationCount(line, line.substr(0, count + 2)))
+                        return "INSERT 0 " + *rows;
+                }
+            }
 
             // The legacy executor reports successful VALUES/SELECT inserts as
             // "N row(s) inserted". Normalize that output to PostgreSQL's
