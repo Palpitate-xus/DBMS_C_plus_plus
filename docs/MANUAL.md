@@ -2324,6 +2324,8 @@ SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
 
 用 `SELECT qty FROM active_orders WHERE order_number = 10` 查询时，如果 `order_number` 直接对应底表的单列整数主键，且每层视图都只是选列和做受支持的简单筛选，数据库可以从底表索引找到这笔订单，再检查它是否符合各层视图的条件。给主键列取别名也可以使用这条路径。用 `EXPLAIN (ANALYZE, FORMAT JSON)` 查看读取步骤和底表取行数。 [验证范围](test-report.md#indexed-view-reads-20261126)
 
+同样的视图可以用 `WHERE order_number BETWEEN 100 AND 115 ORDER BY order_number DESC LIMIT 2` 找到符合条件且编号最大的两笔订单。支持整数比较、`BETWEEN` 和用 `OR` 连接的编号区间。数据库会先判断能否借助底表索引缩小读取范围，再按原条件筛选、排序和分页。 [范围查询测试](test-report.md#view-primary-key-ranges-20261126)
+
 普通表改列名后，受支持的普通视图仍读取同一列，也保留创建视图时的输出列名。比如订单表的 `quantity` 改成 `order_quantity` 后，查询原视图仍可使用 `quantity`。这也适用于受测的 `SELECT *` 子查询、公用表表达式、`JOIN USING` 和 `NATURAL JOIN`。如果无法核实改名仍引用原来的列和连接键，数据库会撤销这次改名。 [早期验证](test-report.md#rename-dependent-views-20261122) · [星号与连接验证](test-report.md#rename-view-star-and-join-20261126)
 
 可以用 `INSERT`、`UPDATE` 和 `DELETE` 操作已识别为可写、直接读取一张表的普通视图。按视图的列名和顺序提供数据，数据库会找到其对应的表列。`UPDATE` 和 `DELETE` 也会应用视图里的 `WHERE`，`RETURNING` 输出视图的列名。改过表列名或调整连接的 `search_path` 后，写入仍使用视图原先选择的表和列。 [写入与回滚测试](test-report.md#writable-view-projection-20261126)

@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 combine integer primary-key ranges across ordinary views",
+      "gap_ids": ["CAT-16", "QRY-12", "OPT-03", "OPT-16"],
+      "status": "partial",
+      "evidence": ["src/executor/ExecutionPlan.cpp", "src/executor/PreparedTableSource.h", "src/main.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/indexed_view_reads_protocol_e2e_test.py", "tests/ordinary_scalar_order_protocol_e2e_test.py"],
+      "verification": [
+        "Compare overlapping and disjoint ranges, integer bounds, NULL, and pagination against PostgreSQL 18.6, including binary parameters.",
+        "Check real heap demand, physical row order without ORDER BY, excessive index ranges, and snapshot fallback.",
+        "Restart with older view files and committed, rolled-back, and interrupted key moves. Compare latency with two previous-build controls."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 use a base table's integer primary key for eligible view point queries",
       "gap_ids": ["CAT-16", "QRY-12", "OPT-03", "OPT-16"],
       "status": "partial",

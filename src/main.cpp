@@ -21538,7 +21538,7 @@ class PreparedWithDmlRuntime {
                                         const dbms::RowContext& outer,const Frames& frames,
                                         dbms::QueryPlanner::PreparedExecutionProvider provider={},
                                         const dbms::CatalogJoinFilters* joinFilters=nullptr,
-                                        const vector<dbms::PreparedViewIntegerLookup>* viewLookups=nullptr) {
+                                        const vector<dbms::PreparedViewIntegerFilter>* viewFilters=nullptr) {
         if(!item)throw dbms::DbError("XX000","mutation source has no retained FROM tree");
         dbms::CatalogJoinFilters localFilters;
         if (const auto* select = dynamic_cast<const dbms::SelectStmt*>(owner);
@@ -21598,10 +21598,10 @@ class PreparedWithDmlRuntime {
                 viewRuntime=make_shared<PreparedWithDmlRuntime>(session_,range.viewQuery,streamResults_,planOnly_);
                 auto* select=dynamic_cast<dbms::SelectStmt*>(range.viewQuery->ast.get());
                 if(!select)throw dbms::DbError("0A000","view source requires a genuine SELECT/VALUES plan");
-                const auto inputLookups = viewLookups ? dbms::preparedViewIntegerLookups(*query_, range, *viewLookups)
-                                                      : vector<dbms::PreparedViewIntegerLookup>{};
+                const auto inputFilters = viewFilters ? dbms::preparedViewIntegerFilters(*query_, range, *viewFilters)
+                                                      : vector<dbms::PreparedViewIntegerFilter>{};
                 cursor=dbms::QueryPlanner::makePreparedCursor(viewRuntime->selectPlan(select,dbms::RowContext{}, {},
-                    false, false, {}, false, inputLookups),range.columns);
+                    false, false, {}, false, inputFilters),range.columns);
                 node->planName = "View Scan";
                 node->planAttributes["relation"] = view;
                 if (cursor->plan()) node->planChildren.push_back(cursor->plan());
@@ -21675,10 +21675,10 @@ class PreparedWithDmlRuntime {
                 }
                 if(!physicalScan)physicalScan=make_unique<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
                 if(select) {
-                    static const vector<dbms::PreparedViewIntegerLookup> noViewLookups;
+                    static const vector<dbms::PreparedViewIntegerFilter> noViewFilters;
                     physicalScan=dbms::makePreparedTableSource(&g_engine,session_.currentDB,
                         query_,const_cast<dbms::SelectStmt*>(select),scanSchema,std::move(physicalScan),
-                        viewLookups ? *viewLookups : noViewLookups);
+                        viewFilters ? *viewFilters : noViewFilters);
                 }
                 scan=shared_ptr<dbms::Operator>(std::move(physicalScan));
                 node->predicateSource=scan.get();
@@ -21980,7 +21980,7 @@ class PreparedWithDmlRuntime {
     dbms::OpPtr selectPlan(dbms::SelectStmt* select,const dbms::RowContext& outer,Frames frames,
                           bool rootDefinitionsProvided=false,bool planRootConstants=false,
                           dbms::QueryPlanner::PreparedExecutionProvider executionProvider={},bool selectBodyOnly=false,
-                          const vector<dbms::PreparedViewIntegerLookup>& viewLookups={}) {
+                          const vector<dbms::PreparedViewIntegerFilter>& viewFilters={}) {
         if(!rootDefinitionsProvided && !select->ctes.empty() && (frames.empty() ||
             !frames.back()->producers.count(select->ctes.front().query.get())))
             frames.push_back(definitions(select->ctes,outer));
@@ -22039,9 +22039,9 @@ class PreparedWithDmlRuntime {
                      (source = dbms::description_catalog::makeCountSource(g_engine, session_.currentDB,
                          sourceRange(select, select->fromClause.get()))))) {
             // An external execution provider can supply new parameters on
-            // rebind. The view lookup uses the root statement's fixed inputs.
-            const auto* lookups = select == readRoot_ && !selectBodyOnly && !executionProvider ? &viewLookups : nullptr;
-            auto node=sourceNode(select,select->fromClause.get(),outer,frames,executionProvider,nullptr,lookups);
+            // rebind. View filters use the root statement's fixed inputs.
+            const auto* filters = select == readRoot_ && !selectBodyOnly && !executionProvider ? &viewFilters : nullptr;
+            auto node=sourceNode(select,select->fromClause.get(),outer,frames,executionProvider,nullptr,filters);
             const function<bool(const dbms::FromItem*)> physicalSources=[&](const dbms::FromItem* item) {
                 if(!item)return false;
                 if(item->type==dbms::FromItem::Type::Join)return physicalSources(item->left.get()) && physicalSources(item->right.get());

@@ -17,6 +17,14 @@ def plan_nodes(node):
         yield from plan_nodes(child)
 
 
+def explain_plan(wire, sql, ready=b"I", analyze=True):
+    options = "ANALYZE, " if analyze else ""
+    frames = wire.send_statements(f"EXPLAIN ({options}FORMAT JSON) " + sql)
+    rows, state, message, names, tag = runner.decode_wire_result(frames)
+    assert (state, names, tag, frames[-1]) == (None, ["QUERY PLAN"], "EXPLAIN", (b"Z", ready)), (sql, message, frames)
+    return json.loads(rows[0][0])
+
+
 def exercise(wire, peer, schema, reference):
     base, inner, outer = (f"{schema}.{name}" for name in ("base", "inner_v", "outer_v"))
     limited, computed = (f"{schema}.{name}" for name in ("limited_v", "computed_v"))
@@ -51,11 +59,7 @@ def exercise(wire, peer, schema, reference):
     wire.query(f"SELECT quotient FROM {computed} WHERE number = 4", state="22012", tag=None)
 
     def explain(sql, ready=b"I", analyze=True):
-        options = "ANALYZE, " if analyze else ""
-        frames = wire.send_statements(f"EXPLAIN ({options}FORMAT JSON) " + sql)
-        rows, state, message, names, tag = runner.decode_wire_result(frames)
-        assert (state, names, tag, frames[-1]) == (None, ["QUERY PLAN"], "EXPLAIN", (b"Z", ready)), (sql, message, frames)
-        return json.loads(rows[0][0])
+        return explain_plan(wire, sql, ready, analyze)
 
     direct = f"SELECT qty FROM {outer} WHERE number = 1"
     if reference:
@@ -77,8 +81,8 @@ def exercise(wire, peer, schema, reference):
             assert all(node.get("actualRows", 0) == 0 for node in nodes if node["nodeType"] == "TableScan"), nodes
         for query in (f"SELECT qty FROM {limited} WHERE number = 1",
                       f"SELECT quotient FROM {computed} WHERE number = 4",
-                      f"SELECT qty FROM {outer} WHERE number = 1 OR number = -3"):
-            assert not any(node["nodeType"] == "IntegerPrimaryKeyPage"
+                      f"SELECT qty FROM {outer} WHERE number = 1 OR qty = 9"):
+            assert not any(node["nodeType"] in {"IntegerPrimaryKeyPage", "IntegerPrimaryKeyRange"}
                            for node in plan_nodes(explain(query, analyze=False)["plan"])), query
 
     name = b"view_lookup"
@@ -165,6 +169,98 @@ def exercise(wire, peer, schema, reference):
             assert any(node["nodeType"] == "IntegerPrimaryKeyPage" for node in nodes) == (namespace == schema), nodes
 
 
+def exercise_ranges(wire, peer, schema, reference):
+    base, inner, middle, outer = (f"{schema}.range_{name}" for name in ("base", "inner", "middle", "outer"))
+    wire.command(f"CREATE TABLE {base}(id int PRIMARY KEY, qty int, note text)", "CREATE TABLE")
+    # Early rows are deliberately out of key order. A complete index range
+    # must preserve the heap order used when the unordered LIMIT falls back.
+    first = [7, 4, 5, 9, 8, 3, 6, 2, 1]
+    other = list(range(10, 2049))
+    ids = first + other
+    wire.command("BEGIN", "BEGIN", b"T")
+    for start in range(0, len(ids), 128):
+        batch = ids[start:start+128]
+        values = ",".join(f"({key},{key if key%2 else -key},'row-{key}')" for key in batch)
+        wire.command(f"INSERT INTO {base} VALUES {values}", f"INSERT 0 {len(batch)}", b"T")
+    wire.command("COMMIT", "COMMIT")
+    wire.command(f"CREATE VIEW {inner} AS SELECT qty,id AS item,note FROM {base} WHERE id >= 3 AND qty > 0", "CREATE VIEW")
+    wire.command(f"CREATE VIEW {middle} AS SELECT item AS number,qty,note FROM {inner} WHERE qty IS NOT NULL", "CREATE VIEW")
+    wire.command(f"CREATE VIEW {outer} AS SELECT * FROM {middle}", "CREATE VIEW")
+    sql = f"SELECT number FROM {outer} WHERE "
+
+    def check(condition, expected, order="ORDER BY number", ready=b"I"):
+        query = f"{sql}{condition} {order}".rstrip()
+        wire.query(query, rows=[(str(n),) for n in expected], tag=f"SELECT {len(expected)}",
+                   fields=[("number", 23)], ready=ready)
+        return query
+
+    def verify_range_plan(query, fetched, intervals=None, ready=b"I"):
+        if reference:
+            return
+        nodes = list(plan_nodes(explain_plan(wire, query, ready)["plan"]))
+        ranges = [node for node in nodes if node["nodeType"] == "IntegerPrimaryKeyRange"]
+        assert len(ranges) == 1, [(n["nodeType"], n.get("relation")) for n in nodes]
+        plan = ranges[0]
+        assert (plan["usedPrimaryKeyRange"] == "true") == (fetched is not None), (query, plan)
+        if fetched is not None:
+            assert int(plan["heapRowsFetched"]) == fetched and int(plan["indexNodesVisited"]) > 0, (query, plan)
+            assert plan.get("indexRanges") == intervals, (query, plan)
+            assert all(node.get("actualRows", 0) == 0 for node in nodes if node["nodeType"] == "TableScan"), (query, plan)
+
+    cases = (
+        ("7 >= number", [3, 5, 7], 5, None),
+        ("number BETWEEN 2 AND 7", [3, 5, 7], 5, None),
+        ("number BETWEEN SYMMETRIC 7 AND 2", [3, 5, 7], 5, None),
+        ("number BETWEEN 3 AND 8 AND number NOT BETWEEN 4 AND 6", [3, 7], 3, "2"),
+        ("number BETWEEN 3 AND 8 AND number <> 4", [3, 5, 7], 5, "2"),
+        ("(number BETWEEN 3 AND 7 AND qty > 0) OR (number BETWEEN 521 AND 524 AND qty >= 0)",
+         [3, 5, 7, 521, 523], 9, "2"),
+        ("number BETWEEN 200 AND 456", list(range(201, 457, 2)), None, None),
+    )
+    for condition, expected, fetched, intervals in cases:
+        verify_range_plan(check(condition, expected), fetched, intervals)
+    check("number < 3", [])
+    check("number > 2147483647::bigint", [])
+    check("number BETWEEN NULL AND 7", [])
+    check("number < 3 OR qty = 11", [11])
+    page = check("number BETWEEN 2 AND 7", [5, 3], "ORDER BY number DESC LIMIT 2 OFFSET 1")
+    verify_range_plan(page, 5)
+    if not reference:
+        unordered = check("number BETWEEN 2 AND 7", [7, 5], "LIMIT 2")
+        # This expression keeps the original full scan and proves fallback
+        # and index access agree on the incumbent order in this fixture.
+        check("number + 0 BETWEEN 2 AND 7", [7, 5], "LIMIT 2")
+        verify_range_plan(unordered, 5)
+
+    prepared = f"SELECT number FROM {outer} WHERE number BETWEEN $1 AND $2 ORDER BY number"
+    name = b"view_range"
+    sync = wire.packet(b"S")
+    assert wire.exchange(wire.parse(prepared, name, (23, 23)) + sync) == [(b"1", b""), (b"Z", b"I")]
+    for lower, upper, expected in ((2,7,[3,5,7]), (9,3,[]), (521,524,[521,523]), (None,7,[])):
+        values = b"".join(struct.pack("!i", -1) if value is None else struct.pack("!ii", 4, value)
+                          for value in (lower, upper))
+        bind = b"\0" + name + b"\0" + struct.pack("!HHH", 1, 1, 2) + values + struct.pack("!HH", 1, 1)
+        frames = wire.exchange(wire.packet(b"B", bind) + wire.describe_portal() + wire.execute() + sync)
+        assert [k for k, _ in frames] == [b"2", b"T"] + [b"D"] * len(expected) + [b"C", b"Z"], frames
+        assert [(f[0], f[3], f[-1]) for f in wire.client.row_description_fields(frames)] == [(b"number", 23, 1)], frames
+        assert wire.client.data_row_values(frames) == [[struct.pack("!i", value)] for value in expected], frames
+        assert frames[-2:] == [(b"C", f"SELECT {len(expected)}\0".encode()), (b"Z", b"I")], frames
+
+    wire.command("BEGIN ISOLATION LEVEL REPEATABLE READ", "BEGIN", b"T")
+    check("number BETWEEN 29 AND 35", [29, 31, 33, 35], ready=b"T")
+    peer.command(f"UPDATE {base} SET id=2100 WHERE id=31", "UPDATE 1")
+    check("number BETWEEN 29 AND 35", [29, 31, 33, 35], ready=b"T")
+    check("number BETWEEN 2099 AND 2101", [], ready=b"T")
+    wire.command("COMMIT", "COMMIT")
+    check("number BETWEEN 29 AND 35", [29, 33, 35])
+    check("number BETWEEN 2099 AND 2101", [2100])
+
+    wire.command("BEGIN ISOLATION LEVEL SERIALIZABLE", "BEGIN", b"T")
+    serial = check("number BETWEEN 29 AND 35", [29, 33, 35], ready=b"T")
+    verify_range_plan(serial, None, ready=b"T")
+    wire.command("ROLLBACK", "ROLLBACK")
+
+
 def main():
     client = runner.load_protocol_client()
     reference = sys.argv[1:] == ["--reference18"]
@@ -189,6 +285,7 @@ def main():
         with closing(socket.create_connection((host, port), timeout=runner.wire_timeout())) as peer:
             startup(peer, user, database, password)
             exercise(wire, Wire(client, peer), schema, reference)
+            exercise_ranges(wire, Wire(client, peer), schema, reference)
         print("[INDEXED VIEW READS] passed", flush=True)
     finally:
         if server:

@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="view-primary-key-ranges-comparison-20261126"></a>
+## 2026-11-26 · 通过视图查询编号范围
+
+PostgreSQL 会在索引扫描和表扫描后排序之间估算代价。匹配 `ORDER BY` 的 B 树可以直接给出所需顺序，并在 `LIMIT` 取够记录时停下。SQLite 可沿符合条件的索引顺序取行，对能分别使用索引的 `OR` 条件可以合并行编号。DuckDB 在扫描时利用每组数据的最小值和最大值跳过无关数据组。 [PostgreSQL 索引排序](https://www.postgresql.org/docs/18/indexes-ordering.html) · [SQLite 查询计划](https://www.sqlite.org/queryplanner.html) · [DuckDB 数据范围索引](https://duckdb.org/docs/current/guides/performance/indexing#zonemaps)
+
+本项目沿普通视图的列别名找到原表的单列整数主键。各层必须满足的同列限制取交集。`OR` 的各分支都有同列限制时，可以读取这些编号范围的并集。索引读取检查范围是否完整，按底表原有行顺序交给视图继续筛选。外层的排序和分页照常执行。范围大、分散到太多数据页或索引无法确认当前事务可见性时，使用原有扫描。 [测试报告](test-report.md#view-primary-key-ranges-20261126) · [性能报告](performance-report-2026-10-30.md#view-primary-key-range-cost-20261126)
+
 <a id="indexed-view-reads-comparison-20261126"></a>
 ## 2026-11-26 · 通过视图按编号查找
 

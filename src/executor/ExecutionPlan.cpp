@@ -5160,6 +5160,7 @@ class IntegerPrimaryKeyPageOp final : public Operator {
     bool descending_;
     IntegerPageBounds bounds_;
     OpPtr fallback_;
+    bool completeRange_;
     const Expr* rangePredicate_;
     std::vector<bool> projectedColumns_;
     std::optional<OrderedPrimaryKeyReadPage> page_;
@@ -5170,14 +5171,15 @@ class IntegerPrimaryKeyPageOp final : public Operator {
 public:
     IntegerPrimaryKeyPageOp(StorageEngine* engine, std::string database, const TableSchema& schema,
             size_t keyColumn, size_t count, bool descending, IntegerPageBounds bounds, OpPtr fallback,
-            const std::vector<bool>& projectedColumns, const Expr* rangePredicate = nullptr)
+            const std::vector<bool>& projectedColumns, bool completeRange = false,
+            const Expr* rangePredicate = nullptr)
         : engine_(engine), database_(std::move(database)), schema_(schema), keyColumn_(keyColumn),
           count_(count), descending_(descending), bounds_(std::move(bounds)), fallback_(std::move(fallback)),
-          rangePredicate_(rangePredicate), projectedColumns_(projectedColumns) {}
+          completeRange_(completeRange), rangePredicate_(rangePredicate), projectedColumns_(projectedColumns) {}
     std::optional<PreparedIntegerKeyOrder> openedKeyOrder() const {
         // Both signed-key scans and successful legacy numeric prefixes
         // return checked heap rows in key order. A heap fallback does not.
-        if (!page_ || rangePredicate_) return {};
+        if (!page_ || completeRange_) return {};
         return PreparedIntegerKeyOrder{keyColumn_, !descending_};
     }
     bool open() override {
@@ -5188,7 +5190,7 @@ public:
         indexEntries_ = indexNodesVisited_ = heapRows_ = 0;
         page_ = engine_->tryReadOrderedIntegerPrimaryKey(database_, schema_.tablename, schema_,
             keyColumn_, descending_, count_, sortWorkMemBytes(), bounds_.lower, bounds_.upper, bounds_.nullTests,
-            rangePredicate_ != nullptr, bounds_.disjointRanges(), projectedColumns_);
+            completeRange_, bounds_.disjointRanges(), projectedColumns_);
         if (page_) {
             usedPage_ = true;
             orderedIndex_ = page_->orderedIndex;
@@ -5250,11 +5252,11 @@ public:
         return origin;
     }
     std::string preparedPlanNodeName() const override {
-        return rangePredicate_ ? "IntegerPrimaryKeyRange" : "IntegerPrimaryKeyPage";
+        return completeRange_ ? "IntegerPrimaryKeyRange" : "IntegerPrimaryKeyPage";
     }
     std::vector<Operator*> preparedPlanChildren() const override { return {fallback_.get()}; }
     std::map<std::string, std::string> preparedPlanAttributes() const override {
-        const char* used = rangePredicate_ ? "usedPrimaryKeyRange" : "usedPrimaryKeyPage";
+        const char* used = completeRange_ ? "usedPrimaryKeyRange" : "usedPrimaryKeyPage";
         if (!usedPage_) return {{used, "false"}};
         std::map<std::string, std::string> attributes{{used, "true"},
             {"orderedIndex", orderedIndex_ ? "true" : "false"}, {"indexEntries", std::to_string(indexEntries_)},
@@ -5929,31 +5931,73 @@ static std::string viewIntegerType(const QueryColumnBinding* column) {
     return plainViewScalar(*column, mapBuiltinTypeNameToOid(type)) ? type : std::string{};
 }
 
-// Moving a necessary equality past a VIEW may suppress evaluation on other
-// rows. Prove the filters are total and row-local before considering the move.
-// Only equalities required by the whole WHERE can become an index candidate.
+static void addViewIntegerFilter(std::vector<PreparedViewIntegerFilter>& filters,
+        const QueryColumnBinding& key, StorageEngine::IntegerPartitionFilter values) {
+    const auto existing = std::find_if(filters.begin(), filters.end(), [&](const auto& filter) {
+        return filter.key.columnOrdinal == key.columnOrdinal && filter.key.sourceOrdinal == key.sourceOrdinal;
+    });
+    if (existing == filters.end()) filters.push_back({key, std::move(values)});
+    else existing->values.intersect(values);
+}
+
+// Applying a condition before a view can suppress evaluation on other rows.
+// Prove the expressions are total and row-local. Each collected filter is a
+// necessary condition on one column, and every original WHERE still runs.
 static bool viewFilterTerms(const Expr* expr, const PreparedQuery& query, const PreparedQuery::SourceRange& range,
-                            std::vector<PreparedViewIntegerLookup>* lookups = nullptr) {
+                            size_t& remaining, std::vector<PreparedViewIntegerFilter>* filters) {
+    using Values = StorageEngine::IntegerPartitionFilter;
     if (!expr) return true;
-    if (expr->preparedSubquery) return false;
+    if (expr->preparedSubquery || !remaining) return false;
+    --remaining;
     if (const auto* column = plainViewColumn(expr, range))
         return ExprHelper::canonicalResultTypeName(column->declaredType) == "boolean" && plainViewScalar(*column, 16);
     if (const auto* literal = dynamic_cast<const LiteralExpr*>(expr))
         return (literal->typeName.empty() || literal->typeName == "boolean") &&
             (literal->value == "true" || literal->value == "false" || literal->value == "null");
     if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
-        if (unary->op == "NOT") return viewFilterTerms(unary->operand.get(), query, range);
+        if (unary->op == "NOT") return viewFilterTerms(unary->operand.get(), query, range, remaining, nullptr);
         const auto* column = plainViewColumn(unary->operand.get(), range);
-        return (unary->op == "IS NULL" || unary->op == "IS NOT NULL") && column &&
-            column->typeMetadata && column->typeMetadata->kind != DatumKind::Record;
+        const bool selectsNull = unary->op == "IS NULL";
+        if ((!selectsNull && unary->op != "IS NOT NULL") || !column || !column->typeMetadata ||
+            column->typeMetadata->kind == DatumKind::Record) return false;
+        if (filters && !viewIntegerType(column).empty()) {
+            Values values;
+            values.matchesNull = selectsNull;
+            if (!selectsNull) values.intervals.emplace_back(INT64_MIN, INT64_MAX);
+            addViewIntegerFilter(*filters, *column, std::move(values));
+        }
+        return true;
+    }
+    if (const auto* between = rangePredicateCall(expr)) {
+        const auto* column = plainViewColumn(between->args.front().get(), range);
+        const auto type = viewIntegerType(column);
+        if (type.empty()) return false;
+        auto values = integerKeyPredicate(expr, range.ordinal, column->columnOrdinal, type, &query, nullptr);
+        if (!values) return false;
+        if (filters) addViewIntegerFilter(*filters, *column, std::move(*values));
+        return true;
     }
     const auto* comparison = dynamic_cast<const BinaryOpExpr*>(expr);
     if (!comparison || comparison->rowComparison || comparison->predicateCollation) return false;
     const auto& op = comparison->op;
-    if (op == "AND" || op == "OR") {
-        auto* required = op == "AND" ? lookups : nullptr;
-        return viewFilterTerms(comparison->left.get(), query, range, required) &&
-            viewFilterTerms(comparison->right.get(), query, range, required);
+    if (op == "AND" || (op == "OR" && !filters)) {
+        return viewFilterTerms(comparison->left.get(), query, range, remaining, filters) &&
+            viewFilterTerms(comparison->right.get(), query, range, remaining, filters);
+    }
+    if (op == "OR") {
+        std::vector<PreparedViewIntegerFilter> left, right;
+        if (!viewFilterTerms(comparison->left.get(), query, range, remaining, &left) ||
+            !viewFilterTerms(comparison->right.get(), query, range, remaining, &right)) return false;
+        for (auto& leftFilter : left) {
+            const auto rightFilter = std::find_if(right.begin(), right.end(), [&](const auto& other) {
+                return leftFilter.key.columnOrdinal == other.key.columnOrdinal;
+            });
+            // A disjunction constrains a given column only when both arms do.
+            if (rightFilter == right.end()) continue;
+            leftFilter.values.unite(rightFilter->values);
+            addViewIntegerFilter(*filters, leftFilter.key, std::move(leftFilter.values));
+        }
+        return true;
     }
     if (op != "=" && op != "<>" && op != "!=" && op != "<" && op != "<=" && op != ">" && op != ">=")
         return false;
@@ -5971,20 +6015,25 @@ static bool viewFilterTerms(const Expr* expr, const PreparedQuery& query, const 
             binding.op != boundOp || binding.leftType != leftType || binding.rightType != rightType ||
             binding.identity != "builtin-comparison:" + boundOp + "(" + leftType + "," + rightType + ")") return false;
     }
-    if (lookups && op == "=") {
-        if (left && rhs) lookups->push_back({*left, rhs->value});
-        if (right && lhs) lookups->push_back({*right, lhs->value});
+    if (filters && left && rhs) {
+        addViewIntegerFilter(*filters, *left, *Values::comparison(op, rhs->value));
+    } else if (filters && right && lhs) {
+        auto reversed = op;
+        if (op == "<" || op == "<=") reversed.front() = '>';
+        else if (op == ">" || op == ">=") reversed.front() = '<';
+        addViewIntegerFilter(*filters, *right, *Values::comparison(reversed, lhs->value));
     }
     return true;
 }
 
-std::vector<PreparedViewIntegerLookup> preparedViewIntegerLookups(const PreparedQuery& parent,
-        const PreparedQuery::SourceRange& range, const std::vector<PreparedViewIntegerLookup>& lookups) {
+std::vector<PreparedViewIntegerFilter> preparedViewIntegerFilters(const PreparedQuery& parent,
+        const PreparedQuery::SourceRange& range, const std::vector<PreparedViewIntegerFilter>& filters) {
     const auto* outer = dynamic_cast<const SelectStmt*>(range.owner);
     if (!outer || outer->fromClause.get() != range.source || !outer->locking.empty() ||
-        (!outer->whereClause && lookups.empty()) || !range.viewQuery) return {};
-    std::vector<PreparedViewIntegerLookup> current = lookups;
-    if (!viewFilterTerms(outer->whereClause.get(), parent, range, &current) || current.empty()) return {};
+        (!outer->whereClause && filters.empty()) || !range.viewQuery) return {};
+    auto current = filters;
+    size_t remaining = maxRangePredicateNodes;
+    if (!viewFilterTerms(outer->whereClause.get(), parent, range, remaining, &current) || current.empty()) return {};
 
     const auto& view = *range.viewQuery;
     const auto* select = dynamic_cast<const SelectStmt*>(view.ast.get());
@@ -6000,8 +6049,7 @@ std::vector<PreparedViewIntegerLookup> preparedViewIntegerLookups(const Prepared
     });
     const auto projected = view.projectionBindings.find(select);
     if (input == view.sourceRanges.end() || projected == view.projectionBindings.end() ||
-        projected->second.size() != range.columns.size() || input->generatedRelation ||
-        !viewFilterTerms(select->whereClause.get(), view, *input)) return {};
+        projected->second.size() != range.columns.size() || input->generatedRelation) return {};
     // Includes both kinds of star expansion. Binding has already resolved
     // each output ordinal, so view aliases and later renames need no lookup.
     for (const auto& field : projected->second) {
@@ -6010,35 +6058,48 @@ std::vector<PreparedViewIntegerLookup> preparedViewIntegerLookups(const Prepared
         const auto* column = dynamic_cast<const ColumnRefExpr*>(field.expression);
         if (column && (column->generatedRead || column->generatedBaseDeclaration)) return {};
     }
-    std::vector<PreparedViewIntegerLookup> result;
-    for (const auto& lookup : current) {
-        if (!localViewColumn(lookup.key, range)) continue;
-        const auto& column = *projected->second[lookup.key.columnOrdinal].column;
+    std::vector<PreparedViewIntegerFilter> result;
+    for (auto& filter : current) {
+        if (!localViewColumn(filter.key, range)) continue;
+        const auto& column = *projected->second[filter.key.columnOrdinal].column;
         const auto type = viewIntegerType(&column);
-        if (!type.empty() && type == viewIntegerType(&lookup.key)) result.push_back({column, lookup.value});
+        if (!type.empty() && type == viewIntegerType(&filter.key))
+            addViewIntegerFilter(result, column, std::move(filter.values));
     }
+    if (result.empty()) return {};
+    remaining = maxRangePredicateNodes;
+    // The next view boundary will collect its local WHERE. For the base
+    // table, combine it here so that both sides of a range can narrow the scan.
+    if (!input->viewQuery && !viewFilterTerms(select->whereClause.get(), view, *input, remaining, &result)) return {};
     return result;
 }
 
 static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
     const TableSchema& schema, OpPtr source, const std::vector<bool>& projectedColumns,
-    const std::vector<PreparedViewIntegerLookup>& viewLookups = {}) {
+    const std::vector<PreparedViewIntegerFilter>& viewFilters = {}) {
     const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
-    if (!viewLookups.empty() && physical && typeid(*physical) == typeid(TableScanOp) &&
+    if (!viewFilters.empty() && physical && typeid(*physical) == typeid(TableScanOp) &&
         physical->tableName() == schema.tablename) {
-        for (const auto& lookup : viewLookups) {
-            if (!integerPageRelation(*query, *select, lookup.key) || !eligibleIntegerPageKey(schema, lookup.key))
+        for (const auto& filter : viewFilters) {
+            const auto key = filter.key.columnOrdinal;
+            if (!integerPageRelation(*query, *select, filter.key) || !eligibleIntegerPageKey(schema, filter.key) ||
+                (filter.values.matchesNull && schema.cols[key].isNull))
                 continue;
             IntegerPageBounds bounds;
-            bounds.lower = bounds.upper = lookup.value;
-            // A single-column primary key can return at most one row. The
-            // original source remains available for snapshots where the
-            // current index cannot answer, and WHERE still runs at each level.
+            bounds.intersect(filter.values);
+            if (!bounds.applyRanges(schema, key) || !bounds.bounded()) continue;
+            const auto& intervals = bounds.ranges->intervals;
+            const bool completeRange = intervals.size() > 1 ||
+                (!intervals.empty() && intervals.front().first != intervals.front().second);
+            // A range must keep heap order for consumers with no ORDER BY.
+            // The storage reader falls back when it cannot fetch the whole
+            // range safely and cheaply. The SQL predicates remain live.
             auto fallback = makePreparedTableSource(engine, database, query, select, schema,
                 std::move(source), projectedColumns);
-            return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, lookup.key.columnOrdinal,
-                1, false, std::move(bounds), std::move(fallback), projectedColumns);
+            const auto count = completeRange ? std::numeric_limits<size_t>::max() : size_t{1};
+            return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, key,
+                count, false, std::move(bounds), std::move(fallback), projectedColumns, completeRange);
         }
     }
     if (auto narrowed = preparedCompositePrimarySource(engine, database, query, *select, schema, source, false))
@@ -6089,7 +6150,7 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
             const auto demand = select->orderBy.empty() ? simplePageDemand(*select) : std::nullopt;
             return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, range->first,
                 demand.value_or(std::numeric_limits<size_t>::max()), false, std::move(range->second),
-                heap(), projectedColumns, select->whereClause.get());
+                heap(), projectedColumns, true, select->whereClause.get());
         }
     }
     const auto* equality = dynamic_cast<const BinaryOpExpr*>(select->whereClause.get());
@@ -6151,9 +6212,9 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
 
 OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
-    const TableSchema& schema, OpPtr source, const std::vector<PreparedViewIntegerLookup>& viewLookups) {
+    const TableSchema& schema, OpPtr source, const std::vector<PreparedViewIntegerFilter>& viewFilters) {
     // The raw-row consumers need the complete physical value envelope.
-    return makePreparedTableSource(engine, database, query, select, schema, std::move(source), {}, viewLookups);
+    return makePreparedTableSource(engine, database, query, select, schema, std::move(source), {}, viewFilters);
 }
 
 static std::vector<bool> projectedPrimaryKeyReadColumns(const PreparedSelectState& state) {
