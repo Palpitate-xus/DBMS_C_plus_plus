@@ -2324,7 +2324,9 @@ SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
 
 可以用 `INSERT`、`UPDATE` 和 `DELETE` 操作已识别为可写、直接读取一张表的普通视图。按视图的列名和顺序提供数据，数据库会找到其对应的表列。`UPDATE` 和 `DELETE` 也会应用视图里的 `WHERE`，`RETURNING` 输出视图的列名。改过表列名或调整连接的 `search_path` 后，写入仍使用视图原先选择的表和列。 [写入与回滚测试](test-report.md#writable-view-projection-20261126)
 
-直接读取表列的普通视图改列名后，受支持的写入用新名称关联原表列。当写入需要转换列名时，`WITH CHECK OPTION` 的插入和更新，以及嵌套视图写入、`ON CONFLICT` 和 `UPDATE ... SET ... = DEFAULT` 仍有差距。 [功能范围](postgresql-18-gap-audit.md)
+直接读取表列的普通视图改列名后，受支持的写入用新名称关联原表列。对直接从单表或逐层从单个视图读取列的定义，`INSERT` 和 `UPDATE` 会应用 `WITH CHECK OPTION`。例如，只显示正数的视图可以拒绝把零或负数写进表里。检查读取实际要存入的数据，包括表默认值。一次写多行时，一行失败会撤销整条语句。 [写入检查](test-report.md#view-check-option-20261126)
+
+`WITH LOCAL CHECK OPTION` 检查本层的条件，下层自己设置的检查也会执行。`WITH CASCADED CHECK OPTION` 继续检查所有下层视图的条件，省略 `LOCAL` 或 `CASCADED` 时使用后一种。分区表、通过视图触发器写入时的级联检查、`MERGE`、`ON CONFLICT` 和以 `WITH` 开头的写入仍待覆盖。 [功能范围](postgresql-18-gap-audit.md)
 
 普通视图的 `CREATE OR REPLACE` 保留既有列名、类型和类型修饰符，允许末尾追加
 列；不兼容替换返回 `42P16` 并保留旧定义。创建时静态绑定输出，不提前执行

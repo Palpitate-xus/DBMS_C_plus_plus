@@ -9,6 +9,7 @@
 #include "Session.h"
 #include "catalog/type_registry.h"
 #include "common/Config.h"
+#include "common/DbError.h"
 #include <cassert>
 #include <cctype>
 #include <filesystem>
@@ -241,6 +242,64 @@ static void test_before_delete() {
     std::cout << "[BEFORE-TRIGGER] BEFORE DELETE OK" << std::endl;
 }
 
+static void test_new_row_check_order() {
+    const std::string db = testDbPath("checked_trigger_row");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, qty INT DEFAULT -9)", s));
+
+    assert(g_engine.createTrigger(db, {"adjust_insert", "before", "insert", "t",
+        "NEW.qty = NEW.qty + 7", "", true, true}) == dbms::DBStatus::OK);
+    assert(g_engine.createTrigger(db, {"adjust_update", "before", "update", "t",
+        "NEW.qty = OLD.qty - 10", "", true, true}) == dbms::DBStatus::OK);
+    assert(g_engine.createTrigger(db, {"count_insert", "after", "insert", "t",
+        "INSERT INTO audit VALUES (1)", "", true, true}) == dbms::DBStatus::OK);
+    assert(g_engine.createTrigger(db, {"count_update", "after", "update", "t",
+        "INSERT INTO audit VALUES (2)", "", true, true}) == dbms::DBStatus::OK);
+
+    size_t firedAfter = 0;
+    g_engine.setTriggerExecutor([&](const std::string& action) {
+        if (action.rfind("INSERT INTO audit", 0) == 0) ++firedAfter;
+        return false;
+    });
+    std::vector<std::string> checked;
+    const dbms::StorageEngine::SqlNewRowCheck check = [&](const auto& row) {
+        checked.push_back(row.at("qty").value());
+        if (std::stoi(checked.back()) <= 0) throw dbms::DbError("44000", "rejected test row");
+    };
+    const auto expectViolation = [](auto operation) {
+        try {
+            operation();
+            assert(false && "the new-row check must reject the statement");
+        } catch (const dbms::DbError& error) {
+            assert(error.sqlState() == "44000");
+        }
+    };
+    const auto insert = [&](const dbms::StorageEngine::SqlRow& row) {
+        return g_engine.insertRow(db, "t", row, nullptr, dbms::StorageEngine::IdentityOverride::None,
+                                  nullptr, false, nullptr, nullptr, nullptr, &check);
+    };
+    assert(insert({{"id", "1"}, {"qty", "-2"}}) == dbms::DBStatus::OK);
+    expectViolation([&] { insert({{"id", "2"}}); });
+
+    dbms::StorageEngine::SqlMutationCallbacks callbacks;
+    callbacks.checkNewRow = check;
+    expectViolation([&] {
+        g_engine.updateRows(db, "t", {{"qty", "23"}}, {"=id 1"}, nullptr, {}, {},
+                            nullptr, nullptr, &callbacks);
+    });
+    assert((checked == std::vector<std::string>{"5", "-2", "-5"}));
+    assert(firedAfter == 1);
+    assert(g_engine.query(db, "t", {"=id 2"}, {}).empty());
+    const auto rows = g_engine.query(db, "t", {"=id 1"}, {"qty"});
+    assert(rows.size() == 1 && rows.front().find("5") != std::string::npos);
+    g_engine.setTriggerExecutor({});
+    cleanup(db);
+    std::cout << "[BEFORE-TRIGGER] stored NEW row checked before AFTER triggers" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     cleanupAllTestData();
@@ -256,6 +315,7 @@ int main() {
     test_before_update_modify();
     test_before_update_sql_action();
     test_before_delete();
+    test_new_row_check_order();
     std::cout << "[BEFORE-TRIGGER] all tests passed" << std::endl;
     return 0;
 }

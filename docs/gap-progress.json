@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 enforce local and cascaded checks on new rows through projected views",
+      "gap_ids": ["CAT-16", "DML-01", "DML-03", "TXN-05"],
+      "status": "partial",
+      "evidence": ["src/commands/DmlExecutor.cpp", "src/commands/DdlExecutor.cpp", "src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/view_check_option.sql", "tests/view_check_option_protocol_e2e_test.py", "tests/before_trigger_test.cpp"],
+      "verification": [
+        "Compare row values, new-row errors, distinct local and cascaded scopes, and savepoints with PostgreSQL 18.6.",
+        "Exercise persisted view definitions with the original metadata layout and verify the final generated or trigger-adjusted row.",
+        "Compare checked DML latency and verify visibility after rejected, uncommitted and committed writes across restarts."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 rename ordinary view columns and restore affected files on failure",
       "gap_ids": ["CAT-16", "SQL-11", "TXN-05", "BACKUP-01"],
       "status": "partial",

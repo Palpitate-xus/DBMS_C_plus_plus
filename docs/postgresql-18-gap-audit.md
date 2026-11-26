@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 通过视图写入时检查新行
+
+对直接读取底表列的单层和多层普通视图，`INSERT` 和 `UPDATE` 检查经过表默认值、存储生成列和表约束处理后的新行。支持 `LOCAL`、`CASCADED` 以及 `44000` 错误语义，多行语句中有一行失败会撤销整条语句。分区表、通过视图触发器写入时的级联检查、计算列组成的视图、`MERGE`、`ON CONFLICT` 及其他设置检查的语法仍有差距。`CAT-16`、`DML-01`、`DML-03` 和 `TXN-05` 保持部分实现。 [功能测试](test-report.md#view-check-option-20261126) · [性能报告](performance-report-2026-10-30.md#view-check-option-cost-20261126)
+
 ## 2026-11-26 · 给普通视图的列改名
 
 `ALTER VIEW [IF EXISTS] ... RENAME [COLUMN] ... TO ...` 支持普通视图，保留列的位置、注释和相关视图的结果。单独执行时，只保存会改动的列目录和依赖视图文件。显式事务和扩展查询协议的恢复仍按原有整库备份流程处理。物化视图、PostgreSQL 允许的其他关系类型、改名后的准备语句失效和复杂视图写入仍有差距。`CAT-16`、`SQL-11`、`TXN-05` 和 `BACKUP-01` 保持部分实现。 [功能测试](test-report.md#alter-view-rename-column-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-rename-column-cost-20261126)

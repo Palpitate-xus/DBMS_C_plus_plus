@@ -54,12 +54,14 @@ def main():
                    fields=[("id", 23), ("qty", 23), ("amount", 23)])
         wire.query("UPDATE origin.report SET qty=999 WHERE id=1", tag=None, state="42703")
 
-        # Existing CHECK OPTION fallback must never write a same-named heap
-        # column that differs from the renamed view output.
+        # CHECK OPTION evaluates the stored NEW row after name mapping.
         wire.command("CREATE VIEW checked AS SELECT id, qty FROM original WHERE qty > 0 WITH CHECK OPTION", "CREATE VIEW")
         wire.command("ALTER VIEW checked RENAME qty TO amount", "ALTER VIEW")
-        wire.query("INSERT INTO checked (id, amount) VALUES (3, 9)", tag=None, state="0A000")
+        wire.query("INSERT INTO checked (id, amount) VALUES (3, -9)", tag=None, state="44000")
         wire.query("SELECT id FROM original WHERE id=3", rows=[], fields=[("id", 23)], tag="SELECT 0")
+        wire.command("INSERT INTO checked (id, amount) VALUES (5, 9)", "INSERT 0 1")
+        wire.query("SELECT qty, amount FROM original WHERE id=5", rows=[("9", "77")],
+                   fields=[("qty", 23), ("amount", 23)])
 
         wire.command("CREATE VIEW trigger_report AS SELECT id, qty FROM original", "CREATE VIEW")
         wire.command("CREATE TRIGGER write_trigger INSTEAD OF INSERT ON trigger_report FOR EACH ROW "

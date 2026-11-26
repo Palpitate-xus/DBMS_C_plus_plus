@@ -6292,6 +6292,23 @@ std::string StorageEngine::getViewSQL(const std::string& dbname,
     if (!ifs) return "";
     std::string sql((std::istreambuf_iterator<char>(ifs)),
                      std::istreambuf_iterator<char>());
+    // Older CREATE VIEW statements sometimes wrote the check option
+    // directly after the query because they had no textual base-table name.
+    // Recover that suffix in memory using the usual empty BASE_TABLE line.
+    constexpr std::string_view check = "WITH_CHECK_OPTION:";
+    const auto option = sql.rfind(check);
+    if (option != std::string::npos && option > 0) {
+        const bool separateLine = sql[option - 1] == '\n';
+        const auto previous = separateLine && option > 1 ? sql.rfind('\n', option - 2) : std::string::npos;
+        if (previous != std::string::npos && sql.compare(previous + 1, 11, "BASE_TABLE:") == 0)
+            return sql;
+        const size_t begin = option + check.size();
+        const auto last = sql.find_last_not_of("\r\n");
+        const auto mode = last >= begin && last != std::string::npos
+            ? SQLParser::toLower(sql.substr(begin, last - begin + 1)) : std::string{};
+        if ((mode == "local" || mode == "cascaded") && !sqlProtectedBytes(sql)[option])
+            sql.insert(option, separateLine ? "BASE_TABLE:\n" : "\nBASE_TABLE:\n");
+    }
     return sql;
 }
 
@@ -6313,20 +6330,23 @@ std::string StorageEngine::getViewBaseTable(const std::string& dbname,
 
 std::string StorageEngine::getViewCheckOption(const std::string& dbname,
                                                const std::string& viewname) const {
-    if (!databaseExists(dbname) || !validMetadataObjectName(viewname)) return "";
-    auto path = viewPath(dbname, viewname);
-    if (!std::filesystem::exists(path)) return "";
-    std::ifstream ifs(path);
-    if (!ifs) return "";
-    std::string line;
-    while (std::getline(ifs, line)) {
-        if (line.substr(0, 17) == "WITH_CHECK_OPTION") {
-            size_t colon = line.find(':');
-            if (colon != std::string::npos) return line.substr(colon + 1);
-            return "CASCADED";
+    const auto definition = getViewSQL(dbname, viewname);
+    constexpr std::string_view marker = "\nWITH_CHECK_OPTION";
+    auto at = definition.find(marker);
+    if (at == std::string::npos) return {};
+    const auto protectedBytes = sqlProtectedBytes(definition);
+    while (at != std::string::npos) {
+        size_t value = at + marker.size();
+        if (!protectedBytes[at + 1]) {
+            if (value == definition.size() || definition[value] == '\n') return "cascaded";
+            if (definition[value] == ':') {
+                ++value;
+                return definition.substr(value, definition.find('\n', value) - value);
+            }
         }
+        at = definition.find(marker, value);
     }
-    return "";
+    return {};
 }
 
 // Forward declaration for validateViewCheckOption
@@ -31612,7 +31632,8 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
                                 OwningMutationRows* owningRows, bool deferVirtualInputs,
                                 SqlRow* conflictingRow,
                                 const OwningSqlRow* arrayDomainInputs,
-                                const CopyInputOrder* copyInput) {
+                                const CopyInputOrder* copyInput,
+                                const SqlNewRowCheck* checkNewRow) {
     if (conflictingRow) conflictingRow->clear();
     const auto ownershipStatus = ensureDatabaseTransactionOwnership(dbname);
     if (ownershipStatus != DBStatus::OK) return ownershipStatus;
@@ -31647,13 +31668,13 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
             return insertInternal(
                 dbname, tablename, values, nullColumns, insertedRows,
                 identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs,
-            nullptr, copyInput);
+                nullptr, copyInput, checkNewRow);
         }
         if (usesLegacyPartitionRoute) {
             const DBStatus status = insertInternal(
                 dbname, tablename, values, nullColumns, insertedRows,
                 identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs,
-            nullptr, copyInput);
+                nullptr, copyInput, checkNewRow);
             if (status != DBStatus::OK && insertedRows) {
                 insertedRows->resize(returnedRowStart);
             }
@@ -31667,7 +31688,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
         const DBStatus insertStatus = insertInternal(
             dbname, tablename, values, nullColumns, insertedRows,
             identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs,
-            nullptr, copyInput);
+            nullptr, copyInput, checkNewRow);
         if (insertStatus != DBStatus::OK) {
             const DBStatus rollbackStatus = rollbackTransaction();
             if (insertedRows) insertedRows->resize(returnedRowStart);
@@ -31711,7 +31732,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
     const DBStatus insertStatus =
         insertInternal(dbname, tablename, values, nullColumns, insertedRows,
                        identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs,
-            nullptr, copyInput);
+            nullptr, copyInput, checkNewRow);
     if (insertStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (transactionContext().inTransaction && hasStatementSavepoint) {
@@ -31783,7 +31804,8 @@ DBStatus StorageEngine::insertInternal(
                                 SqlRow* conflictingRow,
                                 const OwningSqlRow* arrayDomainInputs,
                                 PartitionReplacement* replacement,
-                                const CopyInputOrder* copyInput) {
+                                const CopyInputOrder* copyInput,
+                                const SqlNewRowCheck* checkNewRow) {
     noteTemporaryRelationAccess(dbname, tablename);
     if (!replacement && transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
@@ -33276,7 +33298,7 @@ DBStatus StorageEngine::insertInternal(
     }
 
     const auto captureInsertedValues = [&] {
-        if (insertedRows || owningRows) {
+        if (insertedRows || owningRows || checkNewRow) {
             SqlRow returnedValues;
             std::shared_ptr<OwningRowImage> owning;
             for (size_t i = 0; i < tbl.len(); ++i) {
@@ -33292,6 +33314,7 @@ DBStatus StorageEngine::insertInternal(
                     retainGeneratedValue(owning,false,tbl.cols[i].dataName,value);
                 }
             }
+            if (checkNewRow) (*checkNewRow)(returnedValues);
             if (insertedRows) insertedRows->push_back(std::move(returnedValues));
             if (owningRows) owningRows->push_back(std::move(owning));
         }
@@ -37636,7 +37659,7 @@ DBStatus StorageEngine::updateInternal(
     if (partitionLock) {
         if (exactRids || owningRows || captureLogicalUpdate || (mutationCallbacks &&
             (mutationCallbacks->matches || mutationCallbacks->resolve || mutationCallbacks->resolveArrayDomains ||
-             mutationCallbacks->recheckJoinedTarget || mutationCallbacks->observed)))
+             mutationCallbacks->recheckJoinedTarget || mutationCallbacks->observed || mutationCallbacks->checkNewRow)))
             return DBStatus::FEATURE_NOT_SUPPORTED;
         const bool mayRecheck = mutationCallbacks ? mutationCallbacks->recheckOnConcurrentUpdate : !updateMatcher;
         const auto values = joinSqlRow(updates, updateNullColumns);
@@ -40352,18 +40375,19 @@ DBStatus StorageEngine::updateInternal(
         // value PostgreSQL exposes through UPDATE ... RETURNING: after the
         // row has been rebuilt and generated columns/BEFORE triggers applied,
         // without a second predicate query that could select a different row.
-        if (updatedRows || rowImages || owningRows || (mutationCallbacks && mutationCallbacks->observed)) {
+        const bool captureOld = rowImages || (mutationCallbacks && mutationCallbacks->observed);
+        if (updatedRows || captureOld || owningRows || (mutationCallbacks && mutationCallbacks->checkNewRow)) {
             SqlRow oldValues;
             SqlRow newValues;
             for (size_t i = 0; i < tbl.len(); ++i) {
                 if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
-                if ((tbl.cols[i].generatedKind=='v' && oldVirtualNulls[i]) ||
-                    (tbl.cols[i].generatedKind!='v' && i<oldNullColumns.size() && oldNullColumns[i])) {
-                    oldValues[tbl.cols[i].dataName] = std::nullopt;
-                } else {
-                    oldValues[tbl.cols[i].dataName] =
-                        valueFromRowMap(oldLogicalValues,
-                                        tbl.cols[i].dataName);
+                if (captureOld) {
+                    if ((tbl.cols[i].generatedKind=='v' && oldVirtualNulls[i]) ||
+                        (tbl.cols[i].generatedKind!='v' && i<oldNullColumns.size() && oldNullColumns[i])) {
+                        oldValues[tbl.cols[i].dataName] = std::nullopt;
+                    } else {
+                        oldValues[tbl.cols[i].dataName] = valueFromRowMap(oldLogicalValues, tbl.cols[i].dataName);
+                    }
                 }
                 if (newColumnIsNull(i)) {
                     newValues[tbl.cols[i].dataName] = std::nullopt;
@@ -40376,6 +40400,14 @@ DBStatus StorageEngine::updateInternal(
                     });
                     newValues[tbl.cols[i].dataName]=computedNull?SqlCell{}:SqlCell{std::move(text)};
                     retainGeneratedValue(owning,false,tbl.cols[i].dataName,value);
+                }
+            }
+            if (mutationCallbacks && mutationCallbacks->checkNewRow) {
+                try {
+                    mutationCallbacks->checkNewRow(newValues);
+                } catch (...) {
+                    lockManager_.unlock(tablename);
+                    throw;
                 }
             }
             if (updatedRows) updatedRows->push_back(newValues);

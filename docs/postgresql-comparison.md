@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 通过视图写入时检查新行
+
+PostgreSQL 将视图条件加入写入计划。在表约束和唯一性检查之后，按从内层到外层的顺序检查最终行。`LOCAL` 检查本层，`CASCADED` 将检查传到下层。SQLite 的普通视图可以借助 `INSTEAD OF` 触发器写入。DuckDB 的 `CREATE VIEW` 文档描述了视图执行查询的方式。 [PostgreSQL 改写代码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/rewrite/rewriteHandler.c#L3614-L3679) · [PostgreSQL 写入时机](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeModifyTable.c#L1199-L1214) · [SQLite CREATE VIEW](https://www.sqlite.org/lang_createview.html) · [DuckDB CREATE VIEW](https://duckdb.org/docs/2.0/sql/statements/create_view)
+
+本项目把直接读取表列的视图逐层映射到底表。在表约束和索引检查通过后，用收到的最终行运行视图条件。条件为假或空值都会拒绝写入，事务撤销这条语句的改动。 [功能测试](test-report.md#view-check-option-20261126) · [性能报告](performance-report-2026-10-30.md#view-check-option-cost-20261126)
+
 ## 2026-11-26 · 给普通视图的列改名
 
 PostgreSQL 直接更新 `pg_attribute` 里的列名，保留列编号。已经解析的视图定义继续引用同一个位置。SQLite 在改表时重新写入模式里保存的 SQL 文本，DuckDB 的 `ALTER VIEW` 文档展示视图改名。 [PostgreSQL 列改名实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L3698-L3744) · [PostgreSQL 视图规则](https://www.postgresql.org/docs/18/rules-views.html) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html) · [DuckDB ALTER VIEW](https://duckdb.org/docs/2.0/sql/statements/alter_view)

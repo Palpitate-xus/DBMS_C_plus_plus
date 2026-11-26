@@ -1,6 +1,17 @@
 # 更新日志
 
 <details>
+<summary>通过视图写入时可以检查新数据 · 2026-11-26</summary>
+
+例如，只显示正数的视图开启检查后，会拒绝把零或负数写进去。
+
+一次插入或修改多行时，只要有一行检查失败，这条命令写入的行就会全部撤销。
+
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#view-check-option-20261126) · [性能报告](docs/performance-report-2026-10-30.md#view-check-option-cost-20261126)
+
+</details>
+
+<details>
 <summary>可以给视图的列改名了 · 2026-11-26</summary>
 
 例如，可以把报表视图里的 `qty` 改成 `quantity`。原表和引用它的其他视图保留各自的列名。
@@ -23,18 +34,15 @@
 </details>
 
 <details>
-<summary>表的列改名后，已有报表还能查 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 表的列改名后，已有报表还能查
 
 例如，把订单表的 `qty` 改成 `quantity` 后，通过已有视图做的报表仍可用 `qty` 查询。
 
 这次修复也覆盖视图中按同名列连接的常见写法，以及在子查询或 `WITH` 中用 `SELECT *` 读取所有列的写法。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#rename-view-star-and-join-20261126) · [性能报告](docs/performance-report-2026-10-30.md#rename-view-star-and-join-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 保存视图的说明更快了
 

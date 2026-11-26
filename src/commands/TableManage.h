@@ -716,6 +716,9 @@ public:
         const SqlRow&, SqlRow&)>;
     using SqlUpdateMatcher = std::function<bool(const SqlRow&)>;
     using SqlDeleteMatcher = std::function<bool(const SqlRow&)>;
+    // Called with the stored NEW row after integrity checks and before AFTER
+    // triggers. Throwing rejects the owning SQL statement.
+    using SqlNewRowCheck = std::function<void(const SqlRow&)>;
     // A pure necessary predicate for an ordinary UPDATE's heap scan. The
     // typed matcher remains authoritative, including after a row-lock wait.
     struct IntegerHeapEqualityCandidate {
@@ -746,6 +749,7 @@ public:
         // miss leaves joined source demand and the heap scan unchanged.
         std::string targetPrimaryKeyProbe;
         std::optional<IntegerHeapEqualityCandidate> integerHeapEquality;
+        SqlNewRowCheck checkNewRow;
     };
 
     using UpdateResolver = std::function<bool(
@@ -777,7 +781,8 @@ public:
         bool deferVirtualInputs = false,
         SqlRow* conflictingRow = nullptr,
         const OwningSqlRow* arrayDomainInputs = nullptr,
-        const CopyInputOrder* copyInput = nullptr);
+        const CopyInputOrder* copyInput = nullptr,
+        const SqlNewRowCheck* checkNewRow = nullptr);
     // INSERT INTO t DEFAULT VALUES — uses column defaults or NULL.
     DBStatus insertDefaultValues(const std::string& dbname,
                                  const std::string& tablename,
@@ -2516,7 +2521,8 @@ private:
         SqlRow* conflictingRow = nullptr,
         const OwningSqlRow* arrayDomainInputs = nullptr,
         PartitionReplacement* replacement = nullptr,
-        const CopyInputOrder* copyInput = nullptr);
+        const CopyInputOrder* copyInput = nullptr,
+        const SqlNewRowCheck* checkNewRow = nullptr);
     DBStatus removeInternal(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,

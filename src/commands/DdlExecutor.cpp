@@ -12668,7 +12668,7 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
 
     std::string checkOption = stmt->checkOption;
     std::string storeSql = viewSql;
-    if (!baseTable.empty()) storeSql += "\nBASE_TABLE:" + baseTable + "\n";
+    if (!baseTable.empty() || !checkOption.empty()) storeSql += "\nBASE_TABLE:" + baseTable + "\n";
     if (!checkOption.empty()) storeSql += "WITH_CHECK_OPTION:" + checkOption + "\n";
 
     CatalogManager* catalog = nullptr;

@@ -277,6 +277,7 @@ ALTER TABLE users ALTER COLUMN age TYPE BIGINT;
 **语法**
 ```sql
 CREATE [OR REPLACE] VIEW view_name [(column_name [, ...])] AS SELECT select_clause
+    [WITH [LOCAL | CASCADED] CHECK OPTION];
 ```
 
 **参数**
@@ -294,6 +295,8 @@ SELECT id, name, email FROM users WHERE status = 1;
 `OR REPLACE` 必须保留既有列的名称、类型及长度等类型修饰符，不能删除原列；
 可以在原列之后追加新列。不兼容替换返回 `42P16`，旧定义保持不变。
 显式列名列表可只覆盖查询输出的前几列。建视图只绑定输出元数据，不执行查询。
+
+对受支持的视图，`CHECK OPTION` 要求 `INSERT` 和 `UPDATE` 产生的新行满足视图条件，违反条件返回 `44000`。 [使用手册](MANUAL.md#9-视图与物化视图)
 
 ---
 
