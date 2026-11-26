@@ -3,6 +3,15 @@
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
 
+<a id="attribute-publication-20261126"></a>
+## 2026-11-26 · 列定义保存、事务回滚和旧格式
+
+C++ 用例检查重复开始事务所用的目录文件、通过接口改名、以及同一个已借出的列对象连续两次修改后都能读回新值。在重命名之后模拟目录同步失败，核对重试重新发布文件。带系统调用拦截的目录检查通过 169 项，目标目录写入失败后可以重试开始事务。 [目录用例](../tests/catalog_clean_publication_test.cpp) · [目录检查](../tests/catalog_publication_scan_test.cpp)
+
+在 PostgreSQL 18.6、上一版和本次构建上对照列改名、默认值增删、增加列、删除列和回滚到保存点。比较列定义、默认值标记、事务状态和真实插入值。原生宽度测试的旧断言在两版都要求新建 `TIMETZ` 列为 4 字节，两版各有 1 项失败。将断言更新为实际使用的 12 字节和带时区的存储格式后，两版均通过 115 项，另有存储和范围查询的协议用例通过。 [宽度用例](../tests/physical_attribute_length_test.cpp) · [TIMETZ 存储用例](../tests/timetz_storage_protocol_e2e_test.py)
+
+最终程序通过 19 个协议用例和 24 个 C++ 用例。8 种普通重启、7 种指定时间恢复和两种注释写入故障也通过结果核对。程序 SHA-256 为 `ea90093c31f1d3ac423909410227d80929fd90cd33f5d7bf1ecd4a894827fec9`。 [性能报告](performance-report-2026-10-30.md#attribute-publication-cost-20261126)
+
 <a id="description-publication-20261126"></a>
 ## 2026-11-26 · 注释复用后的写入、回滚和恢复
 

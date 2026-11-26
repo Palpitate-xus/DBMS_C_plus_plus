@@ -1,6 +1,10 @@
 # PostgreSQL 18 功能差距审计
 
 
+## 2026-11-26 · 复用已保存的列定义
+
+事务开始时可以复用已保存的列定义。建表、修改列或迁移旧定义后重新生成内容。如果原生调用者借用了实际列对象，后续保存继续从当前对象生成内容。目录文件更换、写入失败、回滚和重启的核对通过。`CAT-02`、`CAT-03`、`TXN-05` 维持部分实现。 [功能测试](test-report.md#attribute-publication-20261126) · [性能报告](performance-report-2026-10-30.md#attribute-publication-cost-20261126)
+
 ## 2026-11-26 · 复用已保存的注释内容
 
 开始事务时复用上次保存的注释内容。修改、删除与列号变化后重新生成内容。文件版本检查、写入失败重试、保存点和重启恢复经过验证。完整目录更新仍按文件处理，普通读请求仍与注释写入共享数据库级锁。 `CAT-03` 和 `TXN-05` 维持部分实现。 [功能测试](test-report.md#description-publication-20261126) · [性能报告](performance-report-2026-10-30.md#description-publication-cost-20261126)

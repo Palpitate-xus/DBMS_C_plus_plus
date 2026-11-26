@@ -52,7 +52,9 @@ int main() {
     check(beforeSchema.cols[1].dsize==8 &&
           beforeSchema.cols[1].storageCodec==Column::StorageCodec::TemporalMicros,
           "new SQL TIME uses explicit eight-byte microsecond codec");
-    check(beforeSchema.cols[2].dsize==4,"TIMETZ retains existing physical codec");
+    check(beforeSchema.cols[2].dsize==12 &&
+          beforeSchema.cols[2].storageCodec==Column::StorageCodec::ZonedClock,
+          "new SQL TIMETZ stores eight bytes of time and four bytes of offset");
     check(beforeSchema.cols[3].isVariableLength,"INTERVAL retains variable text storage");
     check(g_engine.insertRow(db,"widths",{{"d",std::string("2024-01-01")},
         {"t",std::string("12:34:56")},{"i",std::string("1 day")}})==DBStatus::OK,"insert old physical codecs");

@@ -187,6 +187,35 @@ int main() {
         owner.setDescription(rel, PgClassOid_Class, 2, "retained");
         assert(owner.persistAll());
         assert(!owner.hasUnpublishedChanges());
+        const auto attributePath = root / "pg_attribute.cat";
+        const auto savedAttributes = identity(attributePath);
+        assert(owner.persistCurrent() == CatalogManager::PersistResult::Published);
+        assert(unchanged(savedAttributes, identity(attributePath)));
+        assert(owner.renameAttribute(rel, "old_column", "renamed_column"));
+        assert(owner.hasUnpublishedChanges());
+#ifdef DBMS_CATALOG_FSYNC_FAULT_TEST
+        failDirectorySync = true;
+        assert(owner.persistCurrent() == CatalogManager::PersistResult::Failed);
+        assert(!failDirectorySync && owner.hasUnpublishedChanges());
+        const auto failedAttributes = identity(attributePath);
+#endif
+        assert(owner.persistCurrent() == CatalogManager::PersistResult::Published);
+#ifdef DBMS_CATALOG_FSYNC_FAULT_TEST
+        assert(!unchanged(failedAttributes, identity(attributePath)));
+#endif
+        auto fields = CatalogManager::readMetadataSnapshot(root.string());
+        assert(fields.attributes.size() == 1 && fields.attributes.front().attname == "renamed_column");
+
+        // Saving once cannot make a previously lent attribute safe to reuse.
+        auto* borrowed = const_cast<PgAttributeRow*>(owner.findAttribute(rel, "renamed_column"));
+        assert(borrowed);
+        for (int target : {91, 92}) {
+            borrowed->attstattarget = target;
+            assert(owner.hasUnpublishedChanges());
+            assert(owner.persistCurrent() == CatalogManager::PersistResult::Published);
+            fields = CatalogManager::readMetadataSnapshot(root.string());
+            assert(fields.attributes.size() == 1 && fields.attributes.front().attstattarget == target);
+        }
         assert(owner.remapColumnMetadataAfterDrop(rel, 1));
         assert(owner.hasUnpublishedChanges());
         assert(owner.persistDescriptions());

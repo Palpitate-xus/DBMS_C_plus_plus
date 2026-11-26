@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>表多、列多时少做重复工作 · 2026-11-26</summary>
+
+数据库可以复用没改过的列定义。测试库额外建了 4,096 列且只有一条注释时，按主键查询一行从约 7.8 毫秒缩短到约 4.5 毫秒。
+
+[测试报告](docs/test-report.md#attribute-publication-20261126) · [性能报告](docs/performance-report-2026-10-30.md#attribute-publication-cost-20261126)
+
+</details>
+
+<details>
 <summary>注释多时，普通读写更快 · 2026-11-26</summary>
 
 数据库可以复用已经保存的注释内容。在额外写入 4,096 条列注释的测试库里，按主键读一行从约 25.9 毫秒缩短到约 8.4 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>同时统计表和列的注释更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 同时统计表和列的注释更快
 
 在额外写入 1,024 条列注释的测试库里，一次查询分别统计表注释、列注释和总数，用时从约 50 毫秒缩短到约 7.7 毫秒。
 
 [测试报告](docs/test-report.md#description-count-20261126) · [性能报告](docs/performance-report-2026-10-30.md#description-count-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 按编号统计表注释更快
 

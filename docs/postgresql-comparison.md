@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 复用已保存的列定义
+
+PostgreSQL 在目录记录变更后让其他连接更新相应的缓存。SQLite 通过文件头里的模式版本判断是否需要重新读取表结构。DuckDB 可以在同一写入进程内缓存目录，通过多版本控制处理并发。 [PostgreSQL 目录缓存](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/cache/inval.c) · [SQLite 文件格式](https://www.sqlite.org/fileformat2.html#schema_cookie) · [DuckDB 并发](https://duckdb.org/docs/1.5/connect/concurrency)
+
+本项目在未修改列定义的事务中复用已生成的文件内容，同时检查目录文件版本。真实写入仍生成新内容。列数较多时，这也减少普通事务启动和数据查询的成本。 [功能测试](test-report.md#attribute-publication-20261126) · [性能报告](performance-report-2026-10-30.md#attribute-publication-cost-20261126)
+
 ## 2026-11-26 · 复用已保存的注释内容
 
 PostgreSQL 记录数据页变更，并在事务提交后通知其他连接更新目录缓存。SQLite 的回滚日志流程保存并写回变更页。DuckDB 的检查点将写入日志合入数据库文件。 [PostgreSQL WAL](https://www.postgresql.org/docs/18/wal-intro.html) · [PostgreSQL 目录缓存](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/cache/inval.c#L7-L33) · [SQLite 原子提交](https://www.sqlite.org/atomiccommit.html#writing_changes_to_the_database_file) · [DuckDB 检查点](https://duckdb.org/docs/1.5/sql/statements/checkpoint)

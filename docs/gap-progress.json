@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 reuse saved pg_attribute images in transaction startup",
+      "gap_ids": ["CAT-02", "CAT-03", "TXN-05"],
+      "status": "partial",
+      "evidence": ["src/catalog/catalog.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/catalog_clean_publication_test.cpp", "tests/catalog_publication_scan_test.cpp", "tests/physical_attribute_length_test.cpp", "tests/column_default_expression_protocol_e2e_test.py", "tests/physical_attribute_length_protocol_e2e_test.py"],
+      "verification": [
+        "Verify ordinary column edits, direct borrowed native edits, an interrupted directory sync, and peer publication.",
+        "Compare column names, default flags, savepoint rollback and inserted values with PostgreSQL 18.6.",
+        "Measure the same operations in large column catalogs with and without extra comments."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 reuse unchanged encoded annotation files at transaction start",
       "gap_ids": ["CAT-03", "TXN-05"],
       "status": "partial",

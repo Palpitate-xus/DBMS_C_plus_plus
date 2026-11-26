@@ -168,6 +168,17 @@ struct CatalogPersistenceState {
     // Description rows are private. All edits invalidate the saved bytes
     // under the model mutex. File generation checks still run on reuse.
     bool descriptionChanged = true;
+    enum class AttributeImage { Changed, Saved, Borrowed };
+    AttributeImage attributeImage = AttributeImage::Changed;
+
+    void changeAttributes() {
+        if (attributeImage != AttributeImage::Borrowed) attributeImage = AttributeImage::Changed;
+    }
+
+    void saveAttributes() {
+        if (attributeImage != AttributeImage::Borrowed) attributeImage = AttributeImage::Saved;
+    }
+
     bool namespaceBootstrapApplied = false;
 };
 
@@ -1078,7 +1089,10 @@ Oid CatalogManager::createClass(const PgClassRow& row) {
     classes_.push_back(r);
     classByOid_[oid] = idx;
     classByName_[classNameKey(r.relnamespace, r.relname)] = idx;
-    attributes_.insert(attributes_.end(),systemFields.begin(),systemFields.end());
+    if (!systemFields.empty()) {
+        persistence_->changeAttributes();
+        attributes_.insert(attributes_.end(),systemFields.begin(),systemFields.end());
+    }
     // 表/视图/索引/函数/类型均依赖其所属 schema
     if (r.relnamespace != INVALID_OID) {
         PgDependRow dep;
@@ -1292,7 +1306,10 @@ bool CatalogManager::dropAttributesUnlocked(Oid relOid) {
                              [relOid](const PgAttributeRow& a) {
                                  return a.attrelid == relOid;
                              });
-    attributes_.erase(it, attributes_.end());
+    if (it != attributes_.end()) {
+        attributes_.erase(it, attributes_.end());
+        persistence_->changeAttributes();
+    }
     return true;
 }
 
@@ -1303,6 +1320,7 @@ void CatalogManager::addAttribute(const PgAttributeRow& row) {
        row.attnum>0 && system_attributes::reserved(row.attname))
         throw DbError("42701","column name conflicts with a system column: "+row.attname);
     attributes_.push_back(row);
+    persistence_->changeAttributes();
 }
 
 std::vector<PgAttributeRow> CatalogManager::findAttributesIncludingSystem(Oid relOid) const {
@@ -1410,6 +1428,7 @@ bool CatalogManager::bootstrapSystemAttributes(bool requireExisting) {
         }
     }
     const bool changed = !additions.empty();
+    if (changed) persistence_->changeAttributes();
     attributes_.insert(attributes_.end(), std::make_move_iterator(additions.begin()),
                        std::make_move_iterator(additions.end()));
     systemAttributesMaterialized_ = true;
@@ -1429,6 +1448,9 @@ const PgAttributeRow* CatalogManager::findAttribute(Oid relOid, const std::strin
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& a : attributes_) {
         if (a.attrelid == relOid && a.attname == attname) {
+            // Native callers can edit a borrowed catalog row. Keep using the
+            // actual rows until a successful reload replaces their storage.
+            persistence_->attributeImage = CatalogPersistenceState::AttributeImage::Borrowed;
             return &a;
         }
     }
@@ -1451,6 +1473,7 @@ bool CatalogManager::renameAttribute(
     }
     if (!target) return false;
     target->attname = newName;
+    persistence_->changeAttributes();
     return true;
 }
 
@@ -1492,6 +1515,7 @@ bool CatalogManager::replaceAttributes(
     replacement.insert(
         replacement.end(), attributes.begin(), attributes.end());
     attributes_.swap(replacement);
+    persistence_->changeAttributes();
     classes_[classIt->second].relnatts =
         static_cast<int16_t>(attributes.size());
     return true;
@@ -2145,7 +2169,11 @@ Oid CatalogManager::storeAttrdef(const PgAttrdefRow& row,
     replacement.oid = oidGen_->allocate();
     const auto additions = dependenciesFor(replacement.oid);
     defaults.push_back(replacement); dependencies.insert(dependencies.end(), additions.begin(), additions.end());
-    attrdefs_.swap(defaults); depends_.swap(dependencies); attribute->atthasdef = true;
+    attrdefs_.swap(defaults); depends_.swap(dependencies);
+    if (!attribute->atthasdef) {
+        attribute->atthasdef = true;
+        persistence_->changeAttributes();
+    }
     // SET DEFAULT creates its new identity before the previous identity is
     // released, including replacement by an otherwise identical expression.
     if (oldOid) oidGen_->deallocate(oldOid);
@@ -2174,8 +2202,10 @@ std::vector<PgAttrdefRow> CatalogManager::findAttrdefs(Oid relation) const {
 bool CatalogManager::dropAttrdefUnlocked(Oid oid) {
     const auto found = std::find_if(attrdefs_.begin(), attrdefs_.end(), [&](const auto& d) { return d.oid == oid; });
     if (found == attrdefs_.end()) return false;
-    for (auto& a : attributes_) if (a.attrelid == found->adrelid && a.attnum == found->adnum)
+    for (auto& a : attributes_) if (a.attrelid == found->adrelid && a.attnum == found->adnum && a.atthasdef) {
         a.atthasdef = false;
+        persistence_->changeAttributes();
+    }
     attrdefs_.erase(found); removeDependRecordsUnlocked(PgClassOid_Attrdef, oid);
     if (oidGen_) oidGen_->deallocate(oid);
     return true;
@@ -2921,7 +2951,9 @@ bool CatalogManager::bootstrapBuiltinTypeProperties(bool requireCurrent) {
     }
     // No in-memory edit escapes until the complete staged image validates.
     if(systemAttributesMaterialized_)system_attributes::validateAll(classes_,replacementAttributes,replacementTypes);
-    types_.swap(replacementTypes);attributes_.swap(replacementAttributes);return changed;
+    types_.swap(replacementTypes);attributes_.swap(replacementAttributes);
+    if (changed) persistence_->changeAttributes();
+    return changed;
 }
 
 bool CatalogManager::bootstrapPhysicalArrayAttributes(
@@ -3004,6 +3036,7 @@ bool CatalogManager::bootstrapPhysicalArrayAttributes(
     if (systemAttributesMaterialized_)
         system_attributes::validateAll(classes_, attributes, types_);
     attributes_.swap(attributes);
+    if (changed) persistence_->changeAttributes();
     depends_.swap(dependencies);
     return changed;
 }
@@ -3016,6 +3049,7 @@ bool CatalogManager::bootstrapSystemCatalogCollations(bool requireCurrent) {
     for(const auto index:fields)if(attributes_[index].attcollation!=950) {
         attributes_[index].attcollation=950;changed=true;
     }
+    if (changed) persistence_->changeAttributes();
     return changed;
 }
 
@@ -3051,6 +3085,7 @@ void CatalogManager::bootstrapSystemTypes() {
             element.typarray=definition.oid;
         }
     }
+    persistence_->changeAttributes();
     upgradeLegacyAttributeLengths(attributes_,types_,typeByOid_);
     ensureEnumArrays(types_, typeByOid_, depends_, oidGen_.get());
 }
@@ -3148,7 +3183,11 @@ CatalogManager::ConstraintIdentities CatalogManager::readConstraintIdentities(co
 std::map<std::string, std::string> CatalogManager::serializeAllLocked(WriteScope scope) const {
     std::map<std::string, std::string> images;
     auto persist = [&](const char* name,
-                       const std::function<void(std::ostream&)>& writer) {
+                       const std::function<void(std::ostream&)>& writer, bool saved = false) {
+        if (saved) {
+            images.emplace(name, persistence_->baseline.at(name));
+            return;
+        }
         std::ostringstream image;
         // A failed buffer allocation must not turn a partial image into a
         // successful catalog snapshot or a file eligible for publication.
@@ -3158,19 +3197,15 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked(WriteScope
     };
 
     if (scope != WriteScope::Namespaces) {
-        if (!persistence_->descriptionChanged) {
-            images.emplace("description", persistence_->baseline.at("description"));
-        } else {
-            persist("description", [&](std::ostream& out) {
-                for (const auto& row : descriptions_) {
-                    writeOid(out, row.objoid); out << ',';
-                    writeOid(out, row.classoid); out << ',';
-                    out << row.objsubid << ',';
-                    writeString(out, row.description);
-                    out << '\n';
-                }
-            });
-        }
+        persist("description", [&](std::ostream& out) {
+            for (const auto& row : descriptions_) {
+                writeOid(out, row.objoid); out << ',';
+                writeOid(out, row.classoid); out << ',';
+                out << row.objsubid << ',';
+                writeString(out, row.description);
+                out << '\n';
+            }
+        }, !persistence_->descriptionChanged);
         if (scope == WriteScope::Descriptions) return images;
     }
 
@@ -3256,7 +3291,7 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked(WriteScope
             out << ',' << r.attcollation;
             out << '\n';
         }
-    });
+    }, persistence_->attributeImage == CatalogPersistenceState::AttributeImage::Saved);
 
     // pg_type
     persist("type", [&](std::ostream& out) {
@@ -3491,6 +3526,10 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace,
         current = persistence_->observed;
     }
 
+    const auto markImageSaved = [&](const std::string& name) {
+        if (name == "description") persistence_->descriptionChanged = false;
+        if (name == "attribute") persistence_->saveAttributes();
+    };
     bool ok = true;
     for (const auto& image : images) {
         const auto known = persistence_->publication->durable.find(image.first);
@@ -3499,10 +3538,12 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace,
             known->second.generation == current[image.first] &&
             known->second.bytes == image.second) {
             // A series of edits can restore the exact published image.
-            if (image.first == "description" && persistence_->descriptionChanged) {
+            if ((image.first == "description" && persistence_->descriptionChanged) ||
+                (image.first == "attribute" &&
+                 persistence_->attributeImage == CatalogPersistenceState::AttributeImage::Changed)) {
                 const auto saved = persistence_->baseline.find(image.first);
                 if (saved != persistence_->baseline.end() && saved->second == image.second)
-                    persistence_->descriptionChanged = false;
+                    markImageSaved(image.first);
             }
             continue;
         }
@@ -3528,7 +3569,7 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace,
         persistence_->publication->durable[image.first] = {after, image.second};
         persistence_->observed[image.first] = after;
         persistence_->baseline[image.first] = image.second;
-        if (image.first == "description") persistence_->descriptionChanged = false;
+        markImageSaved(image.first);
         if (image.first == "namespace") invalidateNamespaceReads();
     }
     if (oidGen_ && !oidGen_->persist()) ok = false;
@@ -3561,7 +3602,9 @@ void CatalogManager::loadAllLocked() {
         std::move(nsByName_), std::move(authIdByName_), std::move(classByName_), std::move(descriptionOrder_));
     descriptionOrder_.reset();
     const bool priorDescriptionChanged = persistence_->descriptionChanged;
+    const auto priorAttributeImage = persistence_->attributeImage;
     persistence_->descriptionChanged = true;
+    persistence_->attributeImage = CatalogPersistenceState::AttributeImage::Changed;
     try {
     namespaces_.clear(); classes_.clear(); attributes_.clear(); types_.clear();
     enums_.clear(); procs_.clear(); depends_.clear(); authIds_.clear();
@@ -4127,11 +4170,13 @@ void CatalogManager::loadAllLocked() {
         persistence_->baseline = std::move(images);
         persistence_->observed = std::move(observed);
         persistence_->descriptionChanged = false;
+        persistence_->saveAttributes();
         invalidateNamespaceReads();
     }
     systemAttributesMaterialized_=systemAttributesExpected;
     } catch (...) {
         persistence_->descriptionChanged = priorDescriptionChanged;
+        persistence_->attributeImage = priorAttributeImage;
         std::tie(namespaces_, classes_, attributes_, types_, enums_, procs_,
                  depends_, authIds_, authMembers_, descriptions_, attrdefs_, foreignKeys_, primaryKeys_) = std::move(priorRows);
         std::tie(nsByOid_, classByOid_, typeByOid_, procByOid_, authIdByOid_,

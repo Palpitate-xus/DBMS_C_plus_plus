@@ -7,6 +7,10 @@
 截至 2026-11-26，273 项功能要求中有 22 项完成、170 项部分实现、66 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
 
+## 2026-11-26 · 复用已保存的列定义
+
+数据库可以复用没改过的列定义。测试库额外建了 4,096 列且只有一条注释时，按主键查询一行从约 7.8 毫秒缩短到约 4.5 毫秒。 该组开始事务、插入、更新和删除也有提速。 [功能测试](test-report.md#attribute-publication-20261126) · [性能报告](performance-report-2026-10-30.md#attribute-publication-cost-20261126)
+
 ## 2026-11-26 · 复用已保存的注释内容
 
 数据库可以复用已经保存的注释内容。在额外写入 4,096 条列注释的测试库里，按主键读一行从约 25.9 毫秒缩短到约 8.4 毫秒。 写入、更新和删除也受益于较短的事务启动时间。 [功能测试](test-report.md#description-publication-20261126) · [性能报告](performance-report-2026-10-30.md#description-publication-cost-20261126)
