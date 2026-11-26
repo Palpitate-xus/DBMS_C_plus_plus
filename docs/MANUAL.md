@@ -2328,6 +2328,8 @@ SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
 
 `WITH LOCAL CHECK OPTION` 检查本层的条件，下层自己设置的检查也会执行。`WITH CASCADED CHECK OPTION` 继续检查所有下层视图的条件，省略 `LOCAL` 或 `CASCADED` 时使用后一种。分区表、通过视图触发器写入时的级联检查、`MERGE`、`ON CONFLICT` 和以 `WITH` 开头的写入仍待覆盖。 [功能范围](postgresql-18-gap-audit.md)
 
+创建视图时，也可以把 `WITH (check_option = local)` 或 `WITH (check_option = cascaded)` 写在 `AS` 前面。已有视图可以用 `ALTER VIEW sales.monthly SET (check_option = cascaded)` 开启或切换检查，用 `ALTER VIEW sales.monthly RESET (check_option)` 关闭本层的检查。下层视图自己开启的检查仍会执行。执行者需要拥有视图并能访问它所在的模式。带 `IF EXISTS` 可以跳过不存在的视图。 [设置与回滚测试](test-report.md#alter-view-check-option-20261126)
+
 普通视图的 `CREATE OR REPLACE` 保留既有列名、类型和类型修饰符，允许末尾追加
 列；不兼容替换返回 `42P16` 并保留旧定义。创建时静态绑定输出，不提前执行
 查询或消耗序列。物化视图的支持范围独立于普通视图替换。

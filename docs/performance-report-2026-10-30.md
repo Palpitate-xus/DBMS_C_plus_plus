@@ -4,6 +4,34 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="alter-view-check-option-cost-20261126"></a>
+## 2026-11-26 · 给已有视图开启或关闭写入检查
+
+在上一版 `90b681d6`、本次构建和 PostgreSQL 18.6 各建一张表及三层普通视图。三个版本都开启持久化磁盘同步。上版使用 `CREATE OR REPLACE VIEW` 重发同一查询并添加或移除 `WITH CASCADED CHECK OPTION`。本次构建与 PostgreSQL 执行 `ALTER VIEW report SET (check_option = cascaded)` 和 `ALTER VIEW report RESET (check_option)`。
+
+```sql
+CREATE TABLE base(id int PRIMARY KEY, qty int, active int);
+CREATE VIEW inner_report AS SELECT id,qty,active FROM base WHERE qty > 0;
+CREATE VIEW report AS SELECT id,qty,active FROM inner_report WHERE active = 1;
+CREATE VIEW consumer AS SELECT * FROM report;
+COMMENT ON COLUMN report.qty IS 'quantity';
+```
+
+每次开启后向 `consumer` 写入一行负数，核对收到 `44000`。关闭后用相同主键重试，核对写入成功、底表数量为负数。每轮核对视图编号和列注释。额外空表组新增 64 张 `extra_n(id int PRIMARY KEY, qty int)`。用简单查询协议，从发送修改命令到接收全部回复计时。三轮轮换版本顺序，每轮预热两次、计时五次，每种文件系统共记录 180 个样本。使用 GCC 13.3、C++17、`-O2`，关闭 OpenSSL。
+
+| 文件系统 | 额外空表 | 操作 | 上一版重发视图定义 | 本次直接修改 | PostgreSQL 18.6 |
+| --- | ---: | --- | ---: | ---: | ---: |
+| ext4 | 0 | 开启 | 109.57–161.63 / 215.86 | 30.61–35.96 / 43.36 | 2.72–2.97 / 5.77 |
+| ext4 | 0 | 关闭 | 105.74–189.91 / 221.98 | 29.38–33.86 / 39.34 | 2.41–2.73 / 4.54 |
+| ext4 | 64 | 开启 | 374.81–432.26 / 620.31 | 39.72–40.96 / 46.37 | 1.92–3.13 / 7.94 |
+| ext4 | 64 | 关闭 | 416.43–437.43 / 917.01 | 38.05–42.29 / 47.84 | 1.84–2.73 / 14.74 |
+| tmpfs | 0 | 开启 | 18.84–19.63 / 20.57 | 10.89–11.06 / 11.26 | 0.58–0.64 / 0.70 |
+| tmpfs | 0 | 关闭 | 18.10–19.39 / 19.99 | 9.83–10.06 / 13.49 | 0.42–0.44 / 0.45 |
+| tmpfs | 64 | 开启 | 36.46–40.21 / 40.61 | 12.62–18.31 / 20.67 | 0.67–0.69 / 0.85 |
+| tmpfs | 64 | 关闭 | 35.35–38.96 / 39.20 | 11.40–15.46 / 17.94 | 0.41–0.43 / 0.47 |
+
+表中是三轮中位数范围和所有计时样本的最大值，单位为毫秒。ext4 上有 64 张额外空表时，开启检查从约 375–432 毫秒降到 40–41 毫秒，关闭从约 416–437 毫秒降到 38–42 毫秒。PostgreSQL 开启耗时约 1.9–3.1 毫秒，关闭约 1.8–2.7 毫秒。另一次试跑中三个版本的绝对耗时有所变化，本项目两种修改方式仍有约一个数量级的差距。测试只比较改设置的耗时。 [功能测试](test-report.md#alter-view-check-option-20261126)
+
 <a id="same-page-update-undo-cost-20261126"></a>
 ## 2026-11-26 · 撤销同一数据页上的更新
 

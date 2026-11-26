@@ -1,6 +1,17 @@
 # 更新日志
 
 <details>
+<summary>已有视图也能开启或关闭写入检查 · 2026-11-26</summary>
+
+例如，可以给已有的报表视图开启检查，让它拒绝写入不符合筛选条件的数据。
+
+视图的列名和注释会保留，依赖它的查询也可以继续使用。
+
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#alter-view-check-option-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-check-option-cost-20261126)
+
+</details>
+
+<details>
 <summary>撤销更新时可以少写一次磁盘 · 2026-11-26</summary>
 
 更新前后的数据存放在同一页时，撤销更新只需把这页写一次。
@@ -23,18 +34,15 @@
 </details>
 
 <details>
-<summary>可以给视图的列改名了 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 可以给视图的列改名了
 
 例如，可以把报表视图里的 `qty` 改成 `quantity`。原表和引用它的其他视图保留各自的列名。
 
 通过受支持的单表视图，仍然可以用新列名修改原来的数据。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#alter-view-rename-column-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-rename-column-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 表的列改名后，还能通过视图改数据
 

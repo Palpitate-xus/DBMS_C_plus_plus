@@ -1,12 +1,18 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 修改已有视图的写入检查
+
+普通视图支持在创建时用 `WITH (check_option = …)` 指定检查，也可以通过 `ALTER VIEW … SET` 或 `RESET` 开启、切换和关闭。修改会保留视图编号、注释和依赖。没有修改定义的错误和跳过路径无需保存整库。PostgreSQL 的系统目录选项列、SQL `PREPARE` 下的视图写入和更复杂的可写视图仍有差距。`CAT-16`、`SQL-11`、`TXN-05`、`BACKUP-01` 保持部分实现。 [功能测试](test-report.md#alter-view-check-option-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-check-option-cost-20261126)
+
+对照还复现了早期写入路径上的问题。用 `CREATE VIEW totals AS SELECT count(*) AS total FROM base` 创建视图后，PostgreSQL 拒绝 `INSERT INTO totals VALUES (9)` 并返回 `55000`。上一版和本次构建都会把主键 `9` 写进底表。此问题继续列在 `CAT-16`、`DML-01`。
+
 ## 2026-11-26 · 减少撤销更新时的数据写入
 
 普通表更新前后的行在同一数据页时，撤销更新只写入一份页内容。恢复旧行和移除新行共用一次日志同步和一次数据页同步。不同页上的两个版本分别处理。回归覆盖保存点、索引、写入失败后的重试和进程重启。事务回滚和恢复的其余差距继续记录在 `TXN-05`、`WAL-05` 和 `WAL-07`。 [功能测试](test-report.md#same-page-update-undo-20261126) · [性能报告](performance-report-2026-10-30.md#same-page-update-undo-cost-20261126)
 
 ## 2026-11-26 · 通过视图写入时检查新行
 
-对直接读取底表列的单层和多层普通视图，`INSERT` 和 `UPDATE` 检查经过表默认值、存储生成列和表约束处理后的新行。支持 `LOCAL`、`CASCADED` 以及 `44000` 错误语义，多行语句中有一行失败会撤销整条语句。分区表、通过视图触发器写入时的级联检查、计算列组成的视图、`MERGE`、`ON CONFLICT` 及其他设置检查的语法仍有差距。`CAT-16`、`DML-01`、`DML-03` 和 `TXN-05` 保持部分实现。 [功能测试](test-report.md#view-check-option-20261126) · [性能报告](performance-report-2026-10-30.md#view-check-option-cost-20261126)
+对直接读取底表列的单层和多层普通视图，`INSERT` 和 `UPDATE` 检查经过表默认值、存储生成列和表约束处理后的新行。支持 `LOCAL`、`CASCADED` 以及 `44000` 错误语义，多行语句中有一行失败会撤销整条语句。分区表、通过视图触发器写入时的级联检查、计算列组成的视图、`MERGE` 和 `ON CONFLICT` 仍有差距。`CAT-16`、`DML-01`、`DML-03` 和 `TXN-05` 保持部分实现。 [功能测试](test-report.md#view-check-option-20261126) · [性能报告](performance-report-2026-10-30.md#view-check-option-cost-20261126)
 
 ## 2026-11-26 · 给普通视图的列改名
 

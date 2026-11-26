@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 修改视图的检查选项
+
+PostgreSQL 在视图创建时把 `WITH CHECK OPTION` 加到关系选项里，修改选项时校验视图是否可自动更新，并更新 `pg_class` 的选项列。SQLite 的普通视图可通过 `INSTEAD OF` 触发器处理写入。DuckDB 的文档展示了可随事务回滚的视图改名。 [PostgreSQL ALTER VIEW](https://www.postgresql.org/docs/18/sql-alterview.html) · [PostgreSQL CREATE VIEW 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/view.c#L371-L409) · [SQLite CREATE VIEW](https://www.sqlite.org/lang_createview.html) · [DuckDB ALTER VIEW](https://duckdb.org/docs/2.0/sql/statements/alter_view)
+
+本项目把检查选项保存在普通视图的定义里。用简单查询协议单独修改时，回滚备份包含视图定义和关系目录，`ALTER VIEW` 只改写定义文件。显式事务和扩展查询协议仍使用整库回滚备份。 [功能测试](test-report.md#alter-view-check-option-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-check-option-cost-20261126)
+
 ## 2026-11-26 · 同一页上的更新只写一次就能撤销
 
 PostgreSQL 记录事务已撤销，读取时按事务状态判断哪些行版本可见。SQLite 的回滚日志模式会把数据页的旧内容写回数据库。DuckDB 撤销事务时会清理事务的本地存储，再用撤销缓冲区还原改动。 [PostgreSQL 事务撤销](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/transam/xact.c#L1650-L1727) · [SQLite 数据页恢复](https://www.sqlite.org/atomiccommit.html#rolling_back_incomplete_changes) · [DuckDB 事务撤销](https://github.com/duckdb/duckdb/blob/main/src/transaction/duck_transaction.cpp#L315-L323)

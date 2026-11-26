@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 create and alter check options on ordinary views",
+      "gap_ids": ["CAT-16", "SQL-11", "TXN-05", "BACKUP-01"],
+      "status": "partial",
+      "evidence": ["src/parser/ViewOptions.h", "src/parser/parser.cpp", "src/commands/DdlExecutor.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/view_check_option_ddl.sql", "tests/alter_view_check_option_protocol_e2e_test.py", "tests/view_replacement_contract_test.cpp"],
+      "verification": [
+        "Compare CREATE and ALTER option syntax, diagnostics, nested view writes and savepoints against PostgreSQL 18.6 in both wire protocols.",
+        "Verify view identity, dependencies, comments, legacy files and reuse of a named wire statement after changing options.",
+        "Inject file and directory errors, interrupt publication and compare ALTER latency with the previous CREATE OR REPLACE workflow."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 restore both row versions of an update with one write when they share a page",
       "gap_ids": ["TXN-05", "WAL-05", "WAL-07"],
       "status": "partial",

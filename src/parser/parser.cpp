@@ -1,5 +1,6 @@
 #include "parser.h"
 #include "parser/BetweenSyntax.h"
+#include "parser/ViewOptions.h"
 #include "catalog/catalog.h"
 #include "common/SqlTrivia.h"
 #include "common/DbError.h"
@@ -5884,6 +5885,8 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
         ++pos;
         if (match(tokens, pos, "view")) ++pos;
         auto stmt = parseCreateView(tokens, pos);
+        if (const auto* mv = dynamic_cast<const CreateViewWithOptionsStmt*>(stmt.get());
+            mv && !mv->options.empty()) stmt.reset();
         if (stmt) {
             auto* mvs = static_cast<CreateViewStmt*>(stmt.get());
             mvs->materialized = true;
@@ -8404,10 +8407,9 @@ static std::vector<std::string> collectParenthesized(const std::vector<std::stri
 // CREATE/ALTER relation options share one grammar. Preserve duplicates and
 // source order so the execution layer can report semantic errors at the
 // appropriate point (for example, after IF NOT EXISTS resolution).
-static bool parseRelationOptions(
-    const std::vector<std::string>& tokens, size_t& pos,
-    std::vector<std::pair<std::string, std::string>>& options,
-    bool reset) {
+template<class AppendOption>
+static bool parseRelationOptions(const std::vector<std::string>& tokens,
+    size_t& pos, bool reset, AppendOption appendOption) {
     if (pos >= tokens.size() || tokens[pos++] != "(") return false;
     const auto identifier = [](const std::string& token) {
         if (token.size() >= 2 && token.front() == '"' && token.back() == '"')
@@ -8422,10 +8424,12 @@ static bool parseRelationOptions(
     for (;;) {
         if (pos >= tokens.size() || !identifier(tokens[pos])) return false;
         std::string name = parseRoutineIdentifier(tokens[pos++]);
+        std::string nameSpace;
         if (pos < tokens.size() && tokens[pos] == ".") {
             ++pos;
             if (pos >= tokens.size() || !identifier(tokens[pos])) return false;
-            name += "." + parseRoutineIdentifier(tokens[pos++]);
+            nameSpace = std::move(name);
+            name = parseRoutineIdentifier(tokens[pos++]);
         }
         std::string value;
         if (pos < tokens.size() && tokens[pos] == "=") {
@@ -8444,11 +8448,31 @@ static bool parseRelationOptions(
                 ++pos;
             }
         }
-        options.emplace_back(std::move(name), std::move(value));
+        appendOption(std::move(nameSpace), std::move(name), std::move(value));
         if (pos >= tokens.size()) return false;
         if (tokens[pos] == ")") { ++pos; return true; }
         if (tokens[pos++] != ",") return false;
     }
+}
+
+static bool parseRelationOptions(const std::vector<std::string>& tokens, size_t& pos,
+    std::vector<std::pair<std::string, std::string>>& options, bool reset) {
+    return parseRelationOptions(tokens, pos, reset,
+        [&](std::string nameSpace, std::string name, std::string value) {
+            if (!nameSpace.empty()) name = nameSpace + "." + name;
+            options.emplace_back(std::move(name), std::move(value));
+        });
+}
+
+static bool parseViewOptions(const std::vector<std::string>& tokens, size_t& pos,
+                             std::vector<ViewOption>& options) {
+    return parseRelationOptions(tokens, pos, false,
+        [&](std::string nameSpace, std::string name, std::string value) {
+            std::optional<std::string> decoded;
+            if (!value.empty()) decoded = value.front() == '\''
+                ? stripQuotes(value) : parseRoutineIdentifier(value);
+            options.push_back({std::move(nameSpace), std::move(name), std::move(decoded)});
+        });
 }
 
 // Parse an EXCLUDE constraint clause after the EXCLUDE keyword:
@@ -9363,7 +9387,7 @@ StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size
 }
 
 StmtPtr SQLParser::parseCreateView(const std::vector<std::string>& tokens, size_t& pos) {
-    auto stmt = std::make_unique<CreateViewStmt>();
+    auto stmt = std::make_unique<CreateViewWithOptionsStmt>();
     if (pos < tokens.size()) {
         stmt->viewName = tokens[pos++];
         if (pos < tokens.size() && tokens[pos] == ".") {
@@ -9383,7 +9407,9 @@ StmtPtr SQLParser::parseCreateView(const std::vector<std::string>& tokens, size_
     }
     if (pos < tokens.size() && match(tokens, pos, "with")) {
         ++pos;
-        if (pos + 1 < tokens.size() && match(tokens, pos, "check") && match(tokens, pos + 1, "option")) {
+        if (pos < tokens.size() && tokens[pos] == "(") {
+            if (!parseViewOptions(tokens, pos, stmt->options)) return nullptr;
+        } else if (pos + 1 < tokens.size() && match(tokens, pos, "check") && match(tokens, pos + 1, "option")) {
             pos += 2;
             if (pos < tokens.size()) stmt->checkOption = toLower(tokens[pos++]);
         }
@@ -9423,7 +9449,7 @@ StmtPtr SQLParser::parseCreateView(const std::vector<std::string>& tokens, size_
         stmt->selectSql = selectSql;
         stmt->query = parseSelect(selectSql).stmt;
         pos = tokens.size();
-    }
+    } else return nullptr;
     return stmt;
 }
 
@@ -12710,6 +12736,22 @@ StmtPtr SQLParser::parseAlterView(const std::vector<std::string>& tokens, size_t
     if (match(tokens, pos, "only") ||
         !parseQualifiedIdentifier(tokens, pos, stmt->objectName, true) ||
         pos == tokens.size() || tokens[pos] == ";") return nullptr;
+    if (match(tokens, pos, "reset") ||
+        (match(tokens, pos, "set") && pos + 1 < tokens.size() && tokens[pos + 1] == "(")) {
+        auto options = std::make_unique<AlterViewOptionsStmt>(std::move(*stmt));
+        for (;;) {
+            const bool reset = match(tokens, pos, "reset");
+            if (!reset && !match(tokens, pos, "set")) return nullptr;
+            auto& change = options->changes.emplace_back(AlterViewOptionsStmt::Change{reset, {}});
+            ++pos;
+            if (!parseViewOptions(tokens, pos, change.options)) return nullptr;
+            if (pos == tokens.size() || tokens[pos] == ";") break;
+            if (tokens[pos++] != ",") return nullptr;
+        }
+        if (pos < tokens.size()) ++pos;
+        if (pos != tokens.size()) return nullptr;
+        return options;
+    }
     const bool move = match(tokens, pos, "set") && match(tokens, pos + 1, "schema");
     if (move || (match(tokens, pos, "rename") && match(tokens, pos + 1, "to"))) {
         pos += 2;
