@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>可以查看临时模式的编号和归属 · 2026-11-26</summary>
+<summary>可以查出临时表放在哪个分组 · 2026-11-26</summary>
 
-用 `pg_my_temp_schema()` 可以查当前连接的临时模式编号。列出模式时，也可以用 `pg_is_other_temp_schema()` 排除其他连接的临时模式。
+每个连接的临时表放在自己的分组里。现在可以查到这个分组的编号，也可以在列表里隐藏其他连接的临时分组。
 
 [使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#temp-schema-inspection-20261126) · [性能报告](docs/performance-report-2026-10-30.md#temp-schema-inspection-cost-20261126)
 
 </details>
 
 <details>
-<summary>启用临时模式时减少目录处理 · 2026-11-26</summary>
+<summary>第一次建立临时表分组更快 · 2026-11-26</summary>
 
-首次启用临时模式时，数据库省去了重新整理表和列信息的步骤。在多建了 128 张表的测试库里，用时从约 16–18 毫秒降到约 14–15 毫秒。
+数据库建立临时表分组时，省去了整理其他表信息的步骤。在预先建了 128 张表的测试库里，这一步从约 16–18 毫秒降到约 14–15 毫秒。
 
 [使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#temp-schema-scoped-publication-20261126) · [性能报告](docs/performance-report-2026-10-30.md#temp-schema-scoped-publication-cost-20261126)
 
 </details>
 
 <details>
-<summary>首次查询临时模式更快 · 2026-11-26</summary>
+<summary>第一次查询临时表分组的名称更快 · 2026-11-26</summary>
 
-用 `current_schema` 首次启用临时模式时，数据库省去了整库备份。在多建了 128 张表的测试库里，这步从约 108 毫秒降到约 17 毫秒。
+如果查询时需要先建立临时表分组，数据库省去了一次整库备份。在预先建了 128 张表的测试库里，这一步从约 108 毫秒降到约 17 毫秒。
 
 [使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#temp-namespace-row-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#temp-namespace-row-undo-cost-20261126)
 
