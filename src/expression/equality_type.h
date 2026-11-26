@@ -13,6 +13,10 @@ inline std::pair<std::string,std::string> resolveBuiltinEquality(
     const std::string& leftRaw,const std::string& rightRaw) {
     using namespace common_type_detail;
     const std::string left=canonical(leftRaw),right=canonical(rightRaw);
+    // Of the signatures below, only (oid, oid) can accept a known oid
+    // operand. Use the same implicit conversion rules for its peer.
+    if ((left == "oid" && implicit(right, left)) || (right == "oid" && implicit(left, right)))
+        return {"oid", "oid"};
     using Signature=std::pair<std::string,std::string>;
     static const std::vector<Signature> signatures=[] {
         std::vector<Signature> result;

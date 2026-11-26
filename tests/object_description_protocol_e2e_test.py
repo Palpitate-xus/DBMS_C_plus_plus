@@ -91,6 +91,8 @@ def check(client, sock, reference):
     fields = [('objoid', 26), ('classoid', 26), ('objsubid', 23), ('description', 25)]
     catalog = f"SELECT * FROM pg_catalog.pg_description WHERE objoid='{table}'::oid ORDER BY objsubid"
     for mode in (wire, Wire(client, sock, extended=True)):
+        mode.query(f"SELECT count(*) AS n FROM pg_catalog.pg_description WHERE objoid>={table} "
+                   f"AND classoid=1259 AND objoid<=CAST('{table}' AS oid)", rows=[('2',)], fields=[('n',20)])
         frames = mode.send_statements(catalog)
         mode.check(catalog, frames, rows=rows, fields=fields, tag='SELECT 2')
         assert [field[1:4] for field in client.row_description_fields(frames)] == [

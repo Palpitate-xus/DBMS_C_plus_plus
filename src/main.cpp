@@ -6237,7 +6237,9 @@ static bool handleExplain(const string& sql, Session& s) {
             return dbms::QueryPlanner::usesDeclaredFilterCollations(
                 *select, g_engine.getTableSchema(s.currentDB, physical));
         };
-        if (!select->ctes.empty() || explainNeedsTypedPlan(*select) ||
+        // Binding can replace an explicit OID cast with its numeric value.
+        // The original cast still requires the typed EXPLAIN planner.
+        if (!select->ctes.empty() || explainNeedsTypedPlan(*explainedSelect) || explainNeedsTypedPlan(*select) ||
             dbms::QueryPlanner::mayUseIntegerPrimaryKeyPage(&g_engine,s.currentDB,*prepared,*select) ||
             dbms::mayUseStoredBtreePage(g_engine,s.currentDB,*prepared,*select) ||
             (directCall && directCall->setReturning) || typedDeclaredFilter())

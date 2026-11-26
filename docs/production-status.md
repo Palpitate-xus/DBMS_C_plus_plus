@@ -6,6 +6,10 @@
 
 截至 2026-11-26，273 项功能要求中有 22 项完成、170 项部分实现、66 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-26 · 比较对象编号时省去重复目录检查
+
+按对象编号筛选注释时，已经确定的内置类型无需重复查目录。含 1,024 条额外注释的测试中，按编号范围计数的中位用时从 263.91–264.14 毫秒降到 27.44–27.86 毫秒，PostgreSQL 18.6 为 0.63–0.69 毫秒。 [测试报告](test-report.md#oid-comparison-20261126) · [性能报告](performance-report-2026-10-30.md#oid-comparison-cost-20261126)
+
 ## 2026-11-26 · 注释目录可按名称查找
 
 `pg_description` 可以通过名称或编号查找，普通查询和 `EXPLAIN` 识别同一个目录。客户端可以从查询结果确认四列的来源。旧库升级和恢复旧版备份后继续读回原注释和表数据。 [用法](MANUAL.md#查看对象注释) · [测试报告](test-report.md#description-relation-20261126) · [性能报告](performance-report-2026-10-30.md#description-relation-cost-20261126)

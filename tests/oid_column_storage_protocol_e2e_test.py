@@ -50,6 +50,20 @@ def main():
         review.query("SELECT id FROM stored_oid WHERE k=0", rows=[["1"]], oids=[23])
         review.query("SELECT id FROM stored_oid WHERE k IS NULL", rows=[["2"]], oids=[23])
         review.query("SELECT id FROM stored_oid WHERE k='bad'", state="22P02")
+        command("CREATE SCHEMA oid_names", "CREATE SCHEMA")
+        command("CREATE TYPE oid_names.oid AS ENUM ('example')", "CREATE TYPE")
+        review.query("SET search_path=oid_names,pg_catalog,public", rows=[], tag="SET")
+        review.query("SELECT id FROM stored_oid WHERE k=-1 ORDER BY id", rows=[["4"]], oids=[23])
+        review.query("SELECT k>=-1 AS matches FROM stored_oid WHERE id IN (2,3,4) ORDER BY id",
+                     rows=[[None], ["f"], ["t"]], oids=[16])
+        review.query("SELECT id FROM stored_oid WHERE k>2147483647::pg_catalog.oid ORDER BY id",
+                     rows=[["3"], ["4"]], oids=[23])
+        review.query("SELECT 'example'::oid::text", rows=[["example"]], oids=[25])
+        review.query("SELECT k=CAST(-1 AS smallint) FROM stored_oid WHERE id=4", rows=[["t"]], oids=[16])
+        review.query("SELECT k=-1::bigint FROM stored_oid WHERE id=4", state="22003")
+        review.query("SELECT '2147483648'::pg_catalog.oid>=2147483648", rows=[["t"]], oids=[16])
+        review.parameter("SELECT id FROM stored_oid WHERE k=$1 ORDER BY id", ["-1"], [23], [["4"]], [23])
+        review.query("RESET search_path", rows=[], tag="RESET")
         review.query("INSERT INTO stored_oid VALUES (9,-1::bigint,'negative')", state="22003")
         review.query("INSERT INTO stored_oid VALUES (9,4294967296,'overflow')", state="22003")
         review.query("INSERT INTO stored_oid VALUES (9,'','bad')", state="22P02")
@@ -149,7 +163,7 @@ def main():
         review.query(read_merge, rows=expected, oids=[23, 26])
         command(merge + " WHEN MATCHED THEN UPDATE SET k='010'", "MERGE 3")
         review.query(read_merge, rows=[["11", "8"], ["14", "8"], ["15", "8"]], oids=[23, 26])
-        review.complete(77)
+        review.complete(89)
     finally:
         review.close()
 

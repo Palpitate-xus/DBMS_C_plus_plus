@@ -2,6 +2,15 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="oid-comparison-20261126"></a>
+## 2026-11-26 · 编号比较的结果和执行计划
+
+测试先建一个含内置 `oid` 列的表，再将与内置类型同名的枚举放在搜索路径最前。普通整数 `-1` 与对象编号比较时应匹配 `4294967295`，空值保持 SQL `NULL`。显式转换到同名枚举仍可读取其值。测试还覆盖 `smallint` 的负数、`bigint` 的越界错误、高位编号和带声明类型的整数参数。用上一版复现了负数比较错误。
+
+在 PostgreSQL 18.6 与本项目对照注释计数、同名类型和字段类型。检查 `CAST(... AS pg_catalog.oid)` 与 `::oid` 同时用于编号范围时，`EXPLAIN ANALYZE` 仍采用实际索引范围扫描并返回正确的行数。 [对象编号协议用例](../tests/oid_column_storage_protocol_e2e_test.py) · [索引范围协议用例](../tests/oid_range_protocol_e2e_test.py) · [注释目录协议用例](../tests/object_description_protocol_e2e_test.py)
+
+最终构建通过 17 个协议测试和 12 个 C++ 测试。对象编号列的 89 项检查全部通过，上一版有 5 项失败。普通数据的对象编号重开测试和 8 种注释重启恢复场景通过。构建程序的 SHA-256 为 `e48ad21dd3bfae19853401691f3c927f5e4f6a81f9b9c3f0db71007025d5c029`。 [性能报告](performance-report-2026-10-30.md#oid-comparison-cost-20261126)
+
 <a id="description-relation-20261126"></a>
 ## 2026-11-26 · 注释目录的表名、列来源和执行计划
 

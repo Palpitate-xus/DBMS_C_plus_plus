@@ -1179,7 +1179,7 @@ public:
                     integerInput(binary->right,common_type_detail::canonical(left));
                 else if(!binary->comparison && integer(right) && left=="unknown" && unknownLiteral(binary->left.get()))
                     integerInput(binary->left,common_type_detail::canonical(right));
-                if (binary->op == "=" && !binary->comparison && leftBase == "oid" && rightBase == "oid") {
+                if (!binary->comparison && leftBase == "oid" && rightBase == "oid") {
                     bindOidComparisonConstant(binary->left);
                     bindOidComparisonConstant(binary->right);
                 }

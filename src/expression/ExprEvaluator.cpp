@@ -2901,6 +2901,8 @@ QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp
     return binding;
 }
 
+static ExprValue castBuiltinOid(const ExprValue& value, const std::string& sourceType);
+
 ExprValue ExprEvaluator::coerceComparison(const QueryComparisonBinding& binding,
     const ExprValue& value, bool left) const {
     if (binding.identity.empty() || !binding.strict) throw DbError("XX000","comparison has no prepared implementation");
@@ -2909,6 +2911,10 @@ ExprValue ExprEvaluator::coerceComparison(const QueryComparisonBinding& binding,
     const auto source=common_type_detail::canonical(value.typeName);
     if(source!=target) {
         if(value.isNull)result=ExprValue(target,"",true);
+        else if (target == "oid" && binding.identity.rfind("builtin-comparison:", 0) == 0 &&
+                 (isIntegerTypeName(source) || source == "unknown"))
+            // The operator already chose the built-in OID type.
+            result = castBuiltinOid(value, source);
         else if(source=="real" && target=="double precision")
             result=ExprValue(target,formatFloatingCastValue(static_cast<double>(parseRealCastValue(value))));
         else if(target=="bpchar")result.typeName=target; // implicit, unconstrained CHAR
@@ -5827,6 +5833,15 @@ static Oid integerObjectId(const ExprValue& value, const std::string& type) {
     return static_cast<Oid>(number);
 }
 
+static ExprValue castBuiltinOid(const ExprValue& value, const std::string& sourceType) {
+    const auto oid = common_type_detail::oidType(sourceType)
+        ? (value.objectOid ? *value.objectOid : regtype_detail::numericOid(value.value))
+        : isIntegerTypeName(sourceType) ? integerObjectId(value, sourceType) : parseOidInput(value.value);
+    ExprValue result("oid", std::to_string(oid));
+    result.objectOid = oid;
+    return result;
+}
+
 ExprValue ExprEvaluator::castReferenceValue(const ExprValue& v,
     const std::string& sourceType, const std::string& target,
     StorageEngine& engine, const std::string& database) {
@@ -5979,12 +5994,7 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
     if (target == "oid" && !regtype_cast_detail::reference(sourceType)) {
         regtype_cast_detail::validate(sourceType, target);
         if (v.isNull) return ExprValue("oid", "", true);
-        const auto oid = common_type_detail::oidType(sourceType)
-            ? (v.objectOid ? *v.objectOid : regtype_detail::numericOid(v.value))
-            : isIntegerTypeName(sourceType) ? integerObjectId(v, sourceType) : parseOidInput(v.value);
-        ExprValue result("oid", std::to_string(oid));
-        result.objectOid = oid;
-        return result;
+        return castBuiltinOid(v, sourceType);
     }
     // These actual pg_catalog declarations describe the virtual pg_class
     // schema. They grant no value-input codec. This is a selected runtime

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按编号统计注释更快 · 2026-11-26</summary>
+
+在有 1,024 条额外注释的测试库里，按编号条件统计注释从约 264 毫秒降到约 28 毫秒。
+
+[测试报告](docs/test-report.md#oid-comparison-20261126) · [性能报告](docs/performance-report-2026-10-30.md#oid-comparison-cost-20261126)
+
+</details>
+
+<details>
 <summary>可以查看注释查询怎么执行 · 2026-11-26</summary>
 
 用 `EXPLAIN` 可以查看查询注释的步骤。程序也能按名字找到注释目录 `pg_description`。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>给表和列保存注释更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 给表和列保存注释更快
 
 给表或列加注释时，省去了备份整个数据库的步骤。在另有 128 张表的测试库里，给一张表加注释从约 100 毫秒降到约 16–17 毫秒。
 
 [使用说明](docs/MANUAL.md#查看对象注释) · [回滚测试](docs/test-report.md#comment-file-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#comment-file-undo-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 可以查到给表和列写的注释
 

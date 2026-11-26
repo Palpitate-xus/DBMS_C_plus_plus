@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 比较对象编号时省去重复目录检查
+
+内置 `oid` 比较可以直接使用选定的整数转换，并复用已经确认的内置编号常量。带同名类型的搜索路径、无符号边界、SQL `NULL` 及现有索引范围的执行计划均有回归。查询计数仍需逐行检查候选值，`TYPE-20`、`CAT-03` 和 `OPT-01` 保持部分实现。 [测试报告](test-report.md#oid-comparison-20261126) · [性能报告](performance-report-2026-10-30.md#oid-comparison-cost-20261126)
+
 ## 2026-11-26 · 注释目录可按名称查找
 
 注释目录在 `pg_class` 和 `pg_attribute` 中有正式登记，`regclass`、名称可见性和协议字段来源使用同一身份。普通 `EXPLAIN` 和 `EXPLAIN ANALYZE` 能展示该查询的实际目录扫描。旧版数据和旧版备份的升级经过验证。实体索引及更多系统目录仍待补齐，`CAT-03`、`MON-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#description-relation-20261126) · [性能报告](performance-report-2026-10-30.md#description-relation-cost-20261126)
