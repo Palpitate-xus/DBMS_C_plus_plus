@@ -37,9 +37,10 @@ def main():
     introduction = readme.split("## 最近更新", 1)[0].strip().split("\n\n")
     assert len(introduction) == 3, introduction
     assert all("\n" not in paragraph for paragraph in introduction), introduction
-    for link in ("docs/PACKAGING.md#编译依赖", "docs/MANUAL.md#1-快速开始", "docs/MANUAL.md#18-网络服务",
-                 "docs/README.md", "CHANGELOG.md"):
-        assert link in readme, "README omits %s" % link
+    assert re.findall(r"\]\(([^)]+)\)", introduction[2]) == [
+        "docs/MANUAL.md#1-快速开始", "docs/README.md",
+    ]
+    assert "[完整更新日志](CHANGELOG.md)" in readme
 
     def cards(document):
         return re.findall(r"^<details>\n<summary>(.+)</summary>\n\n([^\n]+)",

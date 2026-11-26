@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>保存注释更快 · 2026-11-26</summary>
+<summary>给表和列保存注释更快 · 2026-11-26</summary>
 
-保存模式、表或列的注释时，数据库只备份相关文件。在额外建了 128 张表的测试库里，保存模式注释从约 100 毫秒降到约 16 毫秒。
+给表或列加注释时，省去了备份整个数据库的步骤。在另有 128 张表的测试库里，给一张表加注释从约 100 毫秒降到约 16–17 毫秒。
 
 [使用说明](docs/MANUAL.md#查看对象注释) · [回滚测试](docs/test-report.md#comment-file-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#comment-file-undo-cost-20261126)
 
 </details>
 
 <details>
-<summary>可以查询表、列和其他对象的注释 · 2026-11-26</summary>
+<summary>可以查到给表和列写的注释 · 2026-11-26</summary>
 
-用 SQL 可以读回给模式、表、列、索引、视图、序列和类型写的注释，换行和引号也会原样保留。
+用 SQL 就能查看之前写下的说明，例如订单表的用途或金额列用的货币。注释里的引号和换行也会原样保留。
 
 [使用说明](docs/MANUAL.md#查看对象注释) · [测试报告](docs/test-report.md#object-description-20261126) · [性能报告](docs/performance-report-2026-10-30.md#object-description-cost-20261126)
 
 </details>
 
 <details>
-<summary>查其他连接的临时表分组更快 · 2026-11-26</summary>
+<summary>查找其他连接的临时表分组更快 · 2026-11-26</summary>
 
-在额外建了 128 个普通分组的测试里，查其他连接的临时分组从约 17 毫秒降到约 3 毫秒。也修复了旧库里同一个分组编号可能查出不同结果的问题。
+数据库会把每个连接的临时表单独放在一组。在额外建了 128 个普通分组的测试库里，查找其他连接的临时分组从约 17 毫秒降到约 3 毫秒。
 
 [使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#namespace-identity-index-20261126) · [性能报告](docs/performance-report-2026-10-30.md#namespace-identity-index-cost-20261126)
 
