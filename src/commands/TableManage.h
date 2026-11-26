@@ -275,8 +275,9 @@ public:
     DBStatus renameView(const std::string& dbname, const std::string& oldName,
                         const std::string& newName, const std::function<void(bool)>& prepareUndo);
     // Returns false if the image exceeds the journal's size limit.
-    bool prepareViewRenameUndo(const std::string& dbname, const std::vector<std::string>& viewNames,
-                               bool changeDependencies, bool changeTriggers);
+    enum class ViewChange { Rename, Move, RenameColumn };
+    bool prepareViewChangeUndo(const std::string& dbname, const std::vector<std::string>& viewNames,
+                               ViewChange change, bool changeTriggers = false);
     DBStatus dropView(const std::string& dbname, const std::string& viewname);
     bool viewExists(const std::string& dbname, const std::string& viewname) const;
     std::string getViewSQL(const std::string& dbname, const std::string& viewname) const;

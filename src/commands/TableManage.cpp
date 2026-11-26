@@ -2101,13 +2101,14 @@ constexpr const char* kViewUndoMember = "view_change";
 constexpr const char* kCommentsPath = ".comments";
 constexpr const char* kDescriptionPath = "pg_catalog/pg_description.cat";
 constexpr const char* kClassPath = "pg_catalog/pg_class.cat";
+constexpr const char* kAttributePath = "pg_catalog/pg_attribute.cat";
 constexpr const char* kDependPath = "pg_catalog/pg_depend.cat";
 constexpr size_t kCreateUndoImageLimit = 256 * 1024 * 1024;
 // Keep allocator counters out of the undo image. They must never move
 // backwards after recovery even if the objects using those IDs disappear.
 const std::array<const char*, 12> kCreateUndoCatalogPaths = {
     "tlist.lst", ".inherits", kCommentsPath, ".exclusions", ".permissions",
-    ".grant_chain", kClassPath, "pg_catalog/pg_attribute.cat",
+    ".grant_chain", kClassPath, kAttributePath,
     "pg_catalog/pg_attrdef.cat", kDependPath, "pg_catalog/pg_constraint.cat",
     kDescriptionPath};
 constexpr std::array<const char*, 2> kCommentUndoPaths = {kCommentsPath, kDescriptionPath};
@@ -2213,8 +2214,9 @@ bool createUndoImageStartsWith(const std::filesystem::path& image, std::string_v
     return in.read(magic, sizeof(magic)) && std::string_view(magic, sizeof(magic)) == version;
 }
 
-bool validViewUndoPath(std::string_view path) {
-    if (path == kClassPath || path == kDependPath || path == ".triggers") return true;
+bool validViewUndoPath(std::string_view path, bool columnRename) {
+    if (columnRename ? path == kAttributePath :
+        path == kClassPath || path == kDependPath || path == ".triggers") return true;
     constexpr std::string_view prefix = ".views/";
     constexpr std::string_view suffix = ".view";
     return path.size() > prefix.size() + suffix.size() &&
@@ -2241,7 +2243,8 @@ using ViewUndoFiles = std::map<std::string, ViewUndoFile>;
 
 bool decodeViewUndo(const std::string& image, const std::string& binding, ViewUndoFiles& files) {
     constexpr size_t digest = create_table_undo::digestBytes;
-    if (image.size() <= 69 + digest || image.compare(0, 69, "CTUV1" + binding) != 0)
+    const bool columnRename = image.compare(0, 69, "CTUV2" + binding) == 0;
+    if (image.size() <= 69 + digest || (!columnRename && image.compare(0, 69, "CTUV1" + binding) != 0))
         return false;
     const auto payload = image.substr(0, image.size() - digest);
     if (SHA256::hash(payload) != image.substr(payload.size())) return false;
@@ -2253,7 +2256,7 @@ bool decodeViewUndo(const std::string& image, const std::string& binding, ViewUn
         const auto path = payload.substr(offset, length);
         offset += length;
         uint64_t mode = 0, size = 0;
-        if (!validViewUndoPath(path) || !relation_name_codec::read(payload, offset, 2, mode) ||
+        if (!validViewUndoPath(path, columnRename) || !relation_name_codec::read(payload, offset, 2, mode) ||
             mode > 0777 || !relation_name_codec::read(payload, offset, 8, size) ||
             (size == 0 && mode != 0) ||
             (size != 0 && size - 1 > payload.size() - offset)) return false;
@@ -2265,7 +2268,7 @@ bool decodeViewUndo(const std::string& image, const std::string& binding, ViewUn
         if (!files.emplace(path, ViewUndoFile{std::move(bytes), static_cast<mode_t>(mode)}).second)
             return false;
     }
-    return files.count(kClassPath) == 1;
+    return files.count(columnRename ? kAttributePath : kClassPath) == 1;
 }
 
 bool restoreViewUndo(const std::filesystem::path& database, const std::string& image,
@@ -59899,8 +59902,8 @@ std::function<bool()> StorageEngine::prepareCommentUndo(const std::string& dbnam
     };
 }
 
-bool StorageEngine::prepareViewRenameUndo(const std::string& dbname,
-    const std::vector<std::string>& viewNames, bool changeDependencies, bool changeTriggers) {
+bool StorageEngine::prepareViewChangeUndo(const std::string& dbname,
+    const std::vector<std::string>& viewNames, ViewChange change, bool changeTriggers) {
     const auto directory = dbPath(dbname);
     const auto error = [] { return DbError("58030", "could not save files before changing the view"); };
     if (!beginCreateTableUndo(dbname) || !viewUndoDirectories(directory) ||
@@ -59912,14 +59915,15 @@ bool StorageEngine::prepareViewRenameUndo(const std::string& dbname,
         {transactionContext().currentTxnId, wal->timelineId(), anchor});
     if (header.empty()) throw error();
 
-    std::set<std::string> paths{kClassPath};
-    if (changeDependencies) paths.emplace(kDependPath);
+    const bool columnRename = change == ViewChange::RenameColumn;
+    std::set<std::string> paths{columnRename ? kAttributePath : kClassPath};
+    if (change == ViewChange::Move) paths.emplace(kDependPath);
     if (changeTriggers) paths.emplace(".triggers");
     for (const auto& view : viewNames)
         paths.emplace(".views/" + view + ".view");
-    std::string image = "CTUV1" + createUndoBinding(directory, header);
+    std::string image = (columnRename ? "CTUV2" : "CTUV1") + createUndoBinding(directory, header);
     for (const auto& path : paths) {
-        if (!validViewUndoPath(path)) throw error();
+        if (!validViewUndoPath(path, columnRename)) throw error();
         const auto file = directory / path;
         struct stat attributes {};
         if (::lstat(file.c_str(), &attributes) != 0) {

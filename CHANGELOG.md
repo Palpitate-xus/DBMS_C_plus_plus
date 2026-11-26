@@ -1,6 +1,17 @@
 # 更新日志
 
 <details>
+<summary>可以给视图的列改名了 · 2026-11-26</summary>
+
+例如，可以把报表视图里的 `qty` 改成 `quantity`。原表和引用它的其他视图保留各自的列名。
+
+通过受支持的单表视图，仍然可以用新列名修改原来的数据。
+
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#alter-view-rename-column-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-rename-column-cost-20261126)
+
+</details>
+
+<details>
 <summary>表的列改名后，还能通过视图改数据 · 2026-11-26</summary>
 
 例如，订单表的 `qty` 改名后，通过原有的单表视图写入 `qty`，值仍会存到原来对应的那一列。
@@ -23,18 +34,15 @@
 </details>
 
 <details>
-<summary>保存视图的说明更快了 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 保存视图的说明更快了
 
 在测试中，给视图保存一条说明比上一版快了约 7 到 12 毫秒。
 
 这个范围来自同一磁盘测试的三轮中位耗时，测试库里另外建了 64 张空表。
 
 [测试报告](docs/test-report.md#undo-stage-sync-20261126) · [性能报告](docs/performance-report-2026-10-30.md#undo-stage-sync-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 给视图改名、换位置更快了
 

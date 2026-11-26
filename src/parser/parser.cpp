@@ -12726,14 +12726,19 @@ StmtPtr SQLParser::parseAlterView(const std::vector<std::string>& tokens, size_t
         auto at = pos + 1;
         if (match(tokens, at, "column")) ++at;
         const auto column = at;
-        std::string name;
-        if (!parseQualifiedIdentifier(tokens, at, name, true) ||
-            at != column + 1 || !match(tokens, at, "to")) return nullptr;
+        std::string oldName, newName;
+        if (!parseQualifiedIdentifier(tokens, at, oldName, true) ||
+            at != column + 1 || !match(tokens, at, "to") ||
+            (oldName.front() != '"' && identifierKeywordKind(toLower(oldName)) > 1)) return nullptr;
         const auto target = ++at;
-        if (!parseQualifiedIdentifier(tokens, at, name, true) || at != target + 1)
+        if (!parseQualifiedIdentifier(tokens, at, newName, true) || at != target + 1 ||
+            (newName.front() != '"' && identifierKeywordKind(toLower(newName)) > 1))
             return nullptr;
         if (at < tokens.size() && tokens[at] == ";") ++at;
         if (at != tokens.size()) return nullptr;
+        pos = at;
+        stmt->subCommand = "RENAME COLUMN " + oldName + " TO " + newName;
+        return stmt;
     }
     std::string rest;
     while (pos < tokens.size() && tokens[pos] != ";") {

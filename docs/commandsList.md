@@ -319,10 +319,11 @@ FROM orders GROUP BY DATE(created_at);
 
 ```sql
 ALTER VIEW [IF EXISTS] view_name RENAME TO new_name;
+ALTER VIEW [IF EXISTS] view_name RENAME [COLUMN] old_name TO new_name;
 ALTER VIEW [IF EXISTS] view_name SET SCHEMA destination_schema;
 ```
 
-改名后仍在原来的模式里。`SET SCHEMA` 把视图移到同一个数据库内已有的模式，视图仍使用原来的数据源。两种操作都会保留视图的注释和依赖关系。带 `IF EXISTS` 时，数据库会提示并跳过缺失的视图。 [使用手册](MANUAL.md#9-视图与物化视图)
+视图改名后仍在原来的模式里。给视图列改名时，原表和依赖视图保留各自的列名。`SET SCHEMA` 把视图移到同一个数据库内已有的模式。三种操作都适用于普通视图，保留注释和已有依赖。带 `IF EXISTS` 时，数据库会提示并跳过缺失的视图。 [使用手册](MANUAL.md#9-视图与物化视图)
 
 ### DROP VIEW
 

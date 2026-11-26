@@ -3272,6 +3272,42 @@ CatalogImageSet CatalogManager::serializeAllLocked(WriteScope scope) const {
         if (scope == WriteScope::Namespaces) return result;
     }
 
+    if (scope == WriteScope::All || scope == WriteScope::Attributes) {
+        // pg_attribute
+        persist("attribute", [&](std::ostream& out) {
+            for (const auto& r : attributes_) {
+                writeOid(out, r.attrelid); out << ',';
+                writeString(out, r.attname); out << ',';
+                writeOid(out, r.atttypid); out << ',';
+                out << r.attnum << ',';
+                out << r.attlen << ',';
+                out << r.atttypmod << ',';
+                out << (r.attnotnull ? 't' : 'f') << ',';
+                out << (r.atthasdef ? 't' : 'f') << ',';
+                out << r.attstorage << ',';
+                out << r.attalign;
+                // Keep the original prefix readable by older catalogs and append
+                // every PgAttributeRow field that was historically omitted.
+                // Character flags are encoded numerically because their unset
+                // representation is NUL, which is unsafe in the text format.
+                out << ',' << r.attstattarget;
+                out << ',' << r.attndims;
+                out << ',' << r.attcacheoff;
+                out << ',' << (r.attbyval ? 't' : 'f');
+                out << ',' << static_cast<unsigned int>(
+                    static_cast<unsigned char>(r.attidentity));
+                out << ',' << static_cast<unsigned int>(
+                    static_cast<unsigned char>(r.attgenerated));
+                out << ',' << (r.attisdropped ? 't' : 'f');
+                out << ',' << (r.attislocal ? 't' : 'f');
+                out << ',' << r.attinhcount;
+                out << ',' << r.attcollation;
+                out << '\n';
+            }
+        });
+        if (scope == WriteScope::Attributes) return result;
+    }
+
     // pg_class
     persist("class", [&](std::ostream& out) {
         for (const auto& r : classes_) {
@@ -3329,39 +3365,6 @@ CatalogImageSet CatalogManager::serializeAllLocked(WriteScope scope) const {
         }
     });
     if (scope == WriteScope::RelationsAndDependencies) return result;
-
-    // pg_attribute
-    persist("attribute", [&](std::ostream& out) {
-        for (const auto& r : attributes_) {
-            writeOid(out, r.attrelid); out << ',';
-            writeString(out, r.attname); out << ',';
-            writeOid(out, r.atttypid); out << ',';
-            out << r.attnum << ',';
-            out << r.attlen << ',';
-            out << r.atttypmod << ',';
-            out << (r.attnotnull ? 't' : 'f') << ',';
-            out << (r.atthasdef ? 't' : 'f') << ',';
-            out << r.attstorage << ',';
-            out << r.attalign;
-            // Keep the original prefix readable by older catalogs and append
-            // every PgAttributeRow field that was historically omitted.
-            // Character flags are encoded numerically because their unset
-            // representation is NUL, which is unsafe in the text format.
-            out << ',' << r.attstattarget;
-            out << ',' << r.attndims;
-            out << ',' << r.attcacheoff;
-            out << ',' << (r.attbyval ? 't' : 'f');
-            out << ',' << static_cast<unsigned int>(
-                static_cast<unsigned char>(r.attidentity));
-            out << ',' << static_cast<unsigned int>(
-                static_cast<unsigned char>(r.attgenerated));
-            out << ',' << (r.attisdropped ? 't' : 'f');
-            out << ',' << (r.attislocal ? 't' : 'f');
-            out << ',' << r.attinhcount;
-            out << ',' << r.attcollation;
-            out << '\n';
-        }
-    });
 
     // pg_type
     persist("type", [&](std::ostream& out) {
@@ -3528,6 +3531,10 @@ bool CatalogManager::persistViewRelations(bool changedDependencies) {
     return persistAllImpl(false, scope) == PersistResult::Published;
 }
 
+bool CatalogManager::persistViewAttributes() {
+    return persistAllImpl(false, WriteScope::Attributes) == PersistResult::Published;
+}
+
 CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace, WriteScope scope) {
     std::error_code pathError;
     const auto catalogPath = std::filesystem::weakly_canonical(dbPath_, pathError);
@@ -3634,6 +3641,7 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace,
     }
     // Renaming a view cannot allocate a catalog object ID.
     if (oidGen_ && scope != WriteScope::Relations && scope != WriteScope::RelationsAndDependencies &&
+        scope != WriteScope::Attributes &&
         !oidGen_->persist()) ok = false;
     return ok ? PersistResult::Published : PersistResult::Failed;
 }

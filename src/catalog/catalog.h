@@ -312,6 +312,7 @@ public:
     bool persistNamespaces();
     bool persistDescriptions();
     bool persistViewRelations(bool changedDependencies);
+    bool persistViewAttributes();
     void loadAll();
     enum class PublicationState { Current, CleanPeerChange, Conflict };
     // Pure serialized-model/generation check. This does not reload rows or
@@ -468,7 +469,7 @@ private:
 
     // 辅助函数
     std::string catalogFilePath(const std::string& tablename) const;
-    enum class WriteScope { All, Namespaces, Descriptions, Relations, RelationsAndDependencies };
+    enum class WriteScope { All, Namespaces, Descriptions, Relations, RelationsAndDependencies, Attributes };
     CatalogImageSet serializeAllLocked(WriteScope scope = WriteScope::All) const;
     PersistResult persistAllImpl(bool reloadInPlace, WriteScope scope = WriteScope::All);
     void loadAllLocked();

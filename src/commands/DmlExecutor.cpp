@@ -7412,10 +7412,30 @@ DmlResult executeAtomicDmlUnit(Session& session,const std::function<DmlResult()>
     return result;
 }
 
+static bool legacyViewWriteNeedsColumnMapping(const PreparedQuery::SourceRange& target) {
+    const auto& view = *target.viewQuery;
+    const auto sameName = [](const auto& left, const auto& right) { return left.name == right.name; };
+    if (!std::equal(target.columns.begin(), target.columns.end(), view.output.begin(), view.output.end(), sameName))
+        return true;
+
+    const auto* select = dynamic_cast<const SelectStmt*>(view.ast.get());
+    const auto fields = view.projectionBindings.find(select);
+    if (fields != view.projectionBindings.end()) {
+        for (size_t i = 0; i < fields->second.size(); ++i) {
+            const auto& field = fields->second[i];
+            if (!field.column) continue;
+            const auto& source = view.sourceRanges.at(field.column->sourceOrdinal);
+            if (target.columns.at(i).name != source.columns.at(field.column->columnOrdinal).name)
+                return true;
+        }
+    }
+    return std::any_of(view.sourceRanges.begin(), view.sourceRanges.end(), [&](const auto& source) {
+        return source.owner == select && source.viewQuery && legacyViewWriteNeedsColumnMapping(source);
+    });
+}
+
 static bool executeProjectedViewDml(const Stmt& statement, Session& session,
     const std::string& storageName, const std::string& sql) {
-    if (g_engine.getViewBaseTable(session.currentDB, storageName).empty() ||
-        !g_engine.getViewCheckOption(session.currentDB, storageName).empty()) return false;
     const auto* insert = dynamic_cast<const InsertStmt*>(&statement);
     const auto* update = dynamic_cast<const UpdateStmt*>(&statement);
     const auto* remove = dynamic_cast<const DeleteStmt*>(&statement);
@@ -7423,17 +7443,28 @@ static bool executeProjectedViewDml(const Stmt& statement, Session& session,
     std::vector<StorageEngine::Trigger> triggers;
     if (!g_engine.tryGetTriggers(session.currentDB, storageName, "instead of", event, triggers))
         throw DbError("58030", "could not read view trigger definitions");
-    if (!triggers.empty()) return false;
 
+    // Validate the caller's names against the view even when an INSTEAD OF
+    // trigger owns the write. A former view column is no longer assignable.
     auto query = std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB, sql));
+    if (!triggers.empty()) return false;
     const auto target = std::find_if(query->sourceRanges.begin(), query->sourceRanges.end(),
         [&](const auto& range) { return range.owner == query->ast.get() && !range.source && range.viewQuery; });
     if (target == query->sourceRanges.end()) return false;
+
     auto projection = writableViewProjection(*target->viewQuery);
-    if (!projection) return false;
+    const bool checkOption = !remove && !g_engine.getViewCheckOption(session.currentDB, storageName).empty();
+    if (!projection || checkOption) {
+        // Replacing just the relation name can silently write a different
+        // column after either the view or its source renames a column.
+        if (!g_engine.getViewBaseTable(session.currentDB, storageName).empty() &&
+            legacyViewWriteNeedsColumnMapping(*target))
+            throw DbError("0A000", "this write form requires additional view rewriting");
+        return false;
+    }
     const auto& source = *projection->source;
     if (g_engine.resolveMaterializedView(session.currentDB, source.relationSchema, source.relationName))
-        return false;
+        throw DbError("55000", "cannot modify a view of a materialized view");
 
     if ((insert && (!insert->conflictAction.empty() || !insert->override_.empty())) ||
         (update && (update->only || !update->whereCurrentOf.empty() ||

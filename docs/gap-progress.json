@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 rename ordinary view columns and restore affected files on failure",
+      "gap_ids": ["CAT-16", "SQL-11", "TXN-05", "BACKUP-01"],
+      "status": "partial",
+      "evidence": ["src/commands/DdlExecutor.cpp", "src/commands/TableManage.cpp", "src/catalog/catalog.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/rename_view_column.sql", "tests/alter_view_rename_column_protocol_e2e_test.py"],
+      "verification": [
+        "Compare ordinary view column rename, dependent joins and writes with PostgreSQL 18.6 in both wire protocols.",
+        "Check owner permissions, saved comments, savepoints and unchanged catalog files.",
+        "Interrupt a dependent definition write and compare recovery and standalone rename costs across two database sizes."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 bind single-table view writes to the original table columns",
       "gap_ids": ["CAT-16", "DML-01", "DML-03"],
       "status": "partial",

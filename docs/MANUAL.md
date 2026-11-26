@@ -2310,6 +2310,8 @@ SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
 
 用 `ALTER VIEW sales.monthly RENAME TO monthly_report` 给普通视图改名。新名字仍在原来的模式里。依赖它的普通视图会继续读取它，注释和已有的触发器也会保留。原视图可能不存在时，使用 `ALTER VIEW IF EXISTS sales.monthly RENAME TO monthly_report`，数据库会提示并跳过不存在的对象。 [改名与回滚测试](test-report.md#alter-view-rename-20261126)
 
+用 `ALTER VIEW sales.monthly RENAME COLUMN qty TO quantity` 修改普通视图对外提供的列名。`COLUMN` 可以省略，也可以用 `IF EXISTS` 跳过缺失的视图。底表保留原列名，已登记依赖的普通视图也保留各自的结果列名。执行者需要拥有视图并能访问所在模式。 [列改名与回滚测试](test-report.md#alter-view-rename-column-20261126)
+
 给普通表改名或用 `ALTER TABLE ... SET SCHEMA` 移动它时，数据库会更新已记录依赖的普通视图。视图继续读取原来的表，并保留结果列名。例如，把 `sales.orders` 移到 `archive` 后，读取该表的视图会随之改读 `archive.orders`。[对照与恢复](test-report.md#view-table-rename-20261122)
 
 用 `ALTER VIEW sales.monthly SET SCHEMA archive` 把普通视图移到同一个数据库内已有的 `archive` 模式。移动后可通过 `archive.monthly` 查询。它仍然使用原来的数据表，注释、触发器和依赖它的普通视图也会保留。执行者需要拥有视图、能访问源模式，并有权在目标模式创建对象。`IF EXISTS` 可跳过缺失的视图。 [迁移与回滚测试](test-report.md#alter-view-set-schema-20261126)
@@ -2322,7 +2324,7 @@ SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
 
 可以用 `INSERT`、`UPDATE` 和 `DELETE` 操作已识别为可写、直接读取一张表的普通视图。按视图的列名和顺序提供数据，数据库会找到其对应的表列。`UPDATE` 和 `DELETE` 也会应用视图里的 `WHERE`，`RETURNING` 输出视图的列名。改过表列名或调整连接的 `search_path` 后，写入仍使用视图原先选择的表和列。 [写入与回滚测试](test-report.md#writable-view-projection-20261126)
 
-该写入路径适用于直接读取表列、没有 `WITH CHECK OPTION` 的视图。视图列名与表列名不同时，`ON CONFLICT` 和 `UPDATE ... SET ... = DEFAULT` 仍待补齐。修改视图自身的列名也待补齐。
+直接读取表列的普通视图改列名后，受支持的写入用新名称关联原表列。当写入需要转换列名时，`WITH CHECK OPTION` 的插入和更新，以及嵌套视图写入、`ON CONFLICT` 和 `UPDATE ... SET ... = DEFAULT` 仍有差距。 [功能范围](postgresql-18-gap-audit.md)
 
 普通视图的 `CREATE OR REPLACE` 保留既有列名、类型和类型修饰符，允许末尾追加
 列；不兼容替换返回 `42P16` 并保留旧定义。创建时静态绑定输出，不提前执行

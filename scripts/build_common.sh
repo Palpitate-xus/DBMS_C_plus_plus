@@ -531,6 +531,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/alter_table_rename_preflight_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/alter_table_if_exists_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/alter_view_rename_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/alter_view_rename_column_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/alter_view_set_schema_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/database_options_atomic_write_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/database_options_concurrent_protocol_e2e_test.py)

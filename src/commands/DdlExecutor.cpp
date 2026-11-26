@@ -12822,12 +12822,18 @@ bool DdlExecutor::executeAlterView(const AlterObjectStmt* stmt, Session& s) {
             toLower(tokens[1]) == "schema";
         const bool rename = tokens.size() > 1 && toLower(tokens[0]) == "rename" &&
             toLower(tokens[1]) == "to";
-        if (!move && !rename)
-            throw DbError("0A000", "ALTER VIEW supports RENAME TO and SET SCHEMA");
-        CatalogManager::QualifiedName destination;
-        if (tokens.size() != 3 || !CatalogManager::parseQualifiedName(tokens[2], destination) ||
+        const bool renameColumn = tokens.size() == 5 && toLower(tokens[0]) == "rename" &&
+            toLower(tokens[1]) == "column" && toLower(tokens[3]) == "to";
+        if (!move && !rename && !renameColumn)
+            throw DbError("0A000", "unsupported ALTER VIEW subcommand");
+        CatalogManager::QualifiedName destination, oldColumn;
+        if ((!renameColumn && tokens.size() != 3) ||
+            !CatalogManager::parseQualifiedName(tokens.back(), destination) ||
             !destination.schema.empty())
             throw DbError("42601", "ALTER VIEW requires an unqualified destination name");
+        if (renameColumn && (!CatalogManager::parseQualifiedName(tokens[2], oldColumn) ||
+            !oldColumn.schema.empty()))
+            throw DbError("42601", "ALTER VIEW requires an unqualified column name");
 
         const std::string schema = requested.schema == "pg_temp"
             ? activeTemporarySchema(&s) : requested.schema;
@@ -12905,6 +12911,40 @@ bool DdlExecutor::executeAlterView(const AlterObjectStmt* stmt, Session& s) {
         if (!space) throw DbError("XX001", "view namespace is missing");
         if (space->nspname == "pg_catalog")
             throw DbError("42501", "permission denied: cannot change a system view");
+
+        if (renameColumn) {
+            const auto attribute = catalog.getAttribute(relation->oid, oldColumn.name);
+            if (!attribute || attribute->attisdropped || attribute->attnum <= 0)
+                throw DbError("42703", "column \"" + oldColumn.name + "\" does not exist");
+            if (catalog.getAttribute(relation->oid, destination.name))
+                throw DbError("42701", "column \"" + destination.name + "\" of relation \"" +
+                                      relation->relname + "\" already exists");
+
+            std::string view, error;
+            if (!catalogViewStorageName(catalog, *relation, view, error))
+                throw DbError("XX001", error);
+            const auto plans = planDependentViewRenames(catalog, s.currentDB, *relation, *attribute, destination.name);
+            bool scopedUndo = false;
+            if (standalone) {
+                std::vector<std::string> changedViews;
+                for (const auto& plan : plans)
+                    if (plan.changed) changedViews.push_back(plan.name);
+                scopedUndo = g_engine.prepareViewChangeUndo(s.currentDB, changedViews, StorageEngine::ViewChange::RenameColumn);
+            }
+            if (!scopedUndo) {
+                if (!txn.prepareSnapshot())
+                    throw DbError("58030", "could not save files before renaming view column");
+                txn.markSnapshotDirty();
+            }
+            if (!catalog.renameAttribute(relation->oid, oldColumn.name, destination.name) ||
+                !(scopedUndo ? catalog.persistViewAttributes() : catalog.persistAll()))
+                throw DbError("58030", "could not save view column name");
+            publishDependentViewRenames(catalog, s.currentDB, plans, txn);
+            txn.recordUpdate(DdlObjectKind::View, view);
+            if (!txn.commit()) throw DbError("58030", "could not commit ALTER VIEW");
+            return false;
+        }
+
         auto target = space;
         if (move) {
             const auto temporary = [](const std::string& name) {
@@ -12956,7 +12996,8 @@ bool DdlExecutor::executeAlterView(const AlterObjectStmt* stmt, Session& s) {
                 for (const auto& plan : plans) {
                     if (plan.changed) changedViews.push_back(plan.name);
                 }
-                scopedUndo = g_engine.prepareViewRenameUndo(s.currentDB, changedViews, move, changeTriggers);
+                scopedUndo = g_engine.prepareViewChangeUndo(s.currentDB, changedViews,
+                    move ? StorageEngine::ViewChange::Move : StorageEngine::ViewChange::Rename, changeTriggers);
                 if (scopedUndo) return;
             }
             if (!txn.prepareSnapshot())
