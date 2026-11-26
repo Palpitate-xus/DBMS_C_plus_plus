@@ -311,6 +311,7 @@ public:
     // Other pending rows remain owned by their original caller.
     bool persistNamespaces();
     bool persistDescriptions();
+    bool persistViewRelations(bool changedDependencies);
     void loadAll();
     enum class PublicationState { Current, CleanPeerChange, Conflict };
     // Pure serialized-model/generation check. This does not reload rows or
@@ -467,7 +468,7 @@ private:
 
     // 辅助函数
     std::string catalogFilePath(const std::string& tablename) const;
-    enum class WriteScope { All, Namespaces, Descriptions };
+    enum class WriteScope { All, Namespaces, Descriptions, Relations, RelationsAndDependencies };
     CatalogImageSet serializeAllLocked(WriteScope scope = WriteScope::All) const;
     PersistResult persistAllImpl(bool reloadInPlace, WriteScope scope = WriteScope::All);
     void loadAllLocked();

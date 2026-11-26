@@ -2089,6 +2089,7 @@ static bool writeRelationListAtomically(const std::filesystem::path& path,
 static bool pathEntryExists(const std::filesystem::path& path, std::error_code& ec);
 static bool renameTablespaceEntryNoReplace(const std::filesystem::path& source,
     const std::filesystem::path& destination, std::error_code& error);
+static bool validMetadataObjectName(const std::string& value);
 
 namespace {
 constexpr const char* kCreateUndo = ".create_table_undo";
@@ -2096,15 +2097,18 @@ constexpr const char* kRetiredCreateUndo = ".create_table_undo.retired";
 constexpr const char* kCreateUndoCleanup = ".create_table_undo.cleanup";
 constexpr const char* kCreateUndoCleanupMember = "cleanup";
 constexpr const char* kCommentUndoMember = "annotations";
+constexpr const char* kViewUndoMember = "view_change";
 constexpr const char* kCommentsPath = ".comments";
 constexpr const char* kDescriptionPath = "pg_catalog/pg_description.cat";
+constexpr const char* kClassPath = "pg_catalog/pg_class.cat";
+constexpr const char* kDependPath = "pg_catalog/pg_depend.cat";
 constexpr size_t kCreateUndoImageLimit = 256 * 1024 * 1024;
 // Keep allocator counters out of the undo image. They must never move
 // backwards after recovery even if the objects using those IDs disappear.
 const std::array<const char*, 12> kCreateUndoCatalogPaths = {
     "tlist.lst", ".inherits", kCommentsPath, ".exclusions", ".permissions",
-    ".grant_chain", "pg_catalog/pg_class.cat", "pg_catalog/pg_attribute.cat",
-    "pg_catalog/pg_attrdef.cat", "pg_catalog/pg_depend.cat", "pg_catalog/pg_constraint.cat",
+    ".grant_chain", kClassPath, "pg_catalog/pg_attribute.cat",
+    "pg_catalog/pg_attrdef.cat", kDependPath, "pg_catalog/pg_constraint.cat",
     kDescriptionPath};
 constexpr std::array<const char*, 2> kCommentUndoPaths = {kCommentsPath, kDescriptionPath};
 constexpr size_t kCreateUndoV2PathCount = 10;
@@ -2163,13 +2167,14 @@ bool captureCreateUndoCatalog(const std::filesystem::path& database,
                                   kCreateUndoV3PathCount, image);
 }
 
-bool restoreCreateUndoPath(const std::filesystem::path& path, const std::optional<std::string>& bytes) {
+bool restoreCreateUndoPath(const std::filesystem::path& path, const std::optional<std::string>& bytes,
+                           std::optional<mode_t> mode = std::nullopt) {
     std::error_code error;
     const auto type = std::filesystem::symlink_status(path, error).type();
     if ((error && error != std::errc::no_such_file_or_directory) ||
         (type != std::filesystem::file_type::regular && type != std::filesystem::file_type::not_found))
         return false;
-    if (bytes) return index_file::writeAtomically(path, *bytes, index_file::DirectorySync::RetryOnce);
+    if (bytes) return index_file::writeAtomically(path, *bytes, index_file::DirectorySync::RetryOnce, mode);
     return type == std::filesystem::file_type::not_found || index_file::removeDurably(path);
 }
 
@@ -2208,18 +2213,85 @@ bool createUndoImageStartsWith(const std::filesystem::path& image, std::string_v
     return in.read(magic, sizeof(magic)) && std::string_view(magic, sizeof(magic)) == version;
 }
 
-bool restoreCreateUndoCatalog(const std::filesystem::path& database,
+bool validViewUndoPath(std::string_view path) {
+    if (path == kClassPath || path == kDependPath || path == ".triggers") return true;
+    constexpr std::string_view prefix = ".views/";
+    constexpr std::string_view suffix = ".view";
+    return path.size() > prefix.size() + suffix.size() &&
+        path.substr(0, prefix.size()) == prefix &&
+        path.substr(path.size() - suffix.size()) == suffix &&
+        validMetadataObjectName(std::string(path.substr(prefix.size(),
+            path.size() - prefix.size() - suffix.size())));
+}
+
+bool viewUndoDirectories(const std::filesystem::path& database) {
+    for (const auto* dirname : {"pg_catalog", ".views"}) {
+        std::error_code error;
+        if (std::filesystem::symlink_status(database / dirname, error).type() !=
+                std::filesystem::file_type::directory || error) return false;
+    }
+    return true;
+}
+
+struct ViewUndoFile {
+    std::optional<std::string> bytes;
+    mode_t mode;
+};
+using ViewUndoFiles = std::map<std::string, ViewUndoFile>;
+
+bool decodeViewUndo(const std::string& image, const std::string& binding, ViewUndoFiles& files) {
+    constexpr size_t digest = create_table_undo::digestBytes;
+    if (image.size() <= 69 + digest || image.compare(0, 69, "CTUV1" + binding) != 0)
+        return false;
+    const auto payload = image.substr(0, image.size() - digest);
+    if (SHA256::hash(payload) != image.substr(payload.size())) return false;
+    size_t offset = 69;
+    while (offset != payload.size()) {
+        uint64_t length = 0;
+        if (!relation_name_codec::read(payload, offset, 2, length) || length > payload.size() - offset)
+            return false;
+        const auto path = payload.substr(offset, length);
+        offset += length;
+        uint64_t mode = 0, size = 0;
+        if (!validViewUndoPath(path) || !relation_name_codec::read(payload, offset, 2, mode) ||
+            mode > 0777 || !relation_name_codec::read(payload, offset, 8, size) ||
+            (size == 0 && mode != 0) ||
+            (size != 0 && size - 1 > payload.size() - offset)) return false;
+        std::optional<std::string> bytes;
+        if (size != 0) {
+            bytes = payload.substr(offset, size - 1);
+            offset += size - 1;
+        }
+        if (!files.emplace(path, ViewUndoFile{std::move(bytes), static_cast<mode_t>(mode)}).second)
+            return false;
+    }
+    return files.count(kClassPath) == 1;
+}
+
+bool restoreViewUndo(const std::filesystem::path& database, const std::string& image,
+                     const std::string& binding) {
+    ViewUndoFiles files;
+    if (!viewUndoDirectories(database) || !decodeViewUndo(image, binding, files)) return false;
+    for (const auto& [path, before] : files) {
+        if (!restoreCreateUndoPath(database / path, before.bytes, before.mode)) return false;
+    }
+    return index_file::syncDirectory(database / ".views");
+}
+
+bool restoreCreateUndoFiles(const std::filesystem::path& database,
                               const std::filesystem::path& journal, bool requireCatalog = false) {
-    std::optional<std::string> catalog, comments, header;
+    std::optional<std::string> catalog, comments, view, header;
     if (!readCreateUndoFile(journal / "catalog", kCreateUndoImageLimit, catalog) ||
         !readCreateUndoFile(journal / kCommentUndoMember, kCreateUndoImageLimit, comments) ||
-        (!catalog && (requireCatalog || !comments)) ||
+        !readCreateUndoFile(journal / kViewUndoMember, kCreateUndoImageLimit, view) ||
+        (!catalog && (requireCatalog || (!comments && !view))) ||
         !readCreateUndoFile(journal / "header", create_table_undo::maxRecordBytes, header) || !header) return false;
 
     std::error_code directoryError;
     if (std::filesystem::symlink_status(database / "pg_catalog", directoryError).type() !=
             std::filesystem::file_type::directory || directoryError) return false;
     const auto binding = createUndoBinding(database, *header);
+    if (view) return !catalog && !comments && restoreViewUndo(database, *view, binding);
     CreateUndoFiles oldCatalog, oldComments;
     if (catalog) {
         size_t count = kCreateUndoCatalogPaths.size();
@@ -2248,6 +2320,20 @@ std::filesystem::path makeCreateUndoStage(const std::filesystem::path& database)
     auto path = (database / ".create_table_undo.stage.XXXXXX").string();
     if (!::mkdtemp(path.data())) return {};
     return path;
+}
+
+bool publishCreateUndo(const std::filesystem::path& database, const char* member,
+                       const std::string& image, const std::string& header) {
+    const auto stage = makeCreateUndoStage(database);
+    if (stage.empty()) return false;
+    std::error_code error;
+    if (index_file::writeAtomicallyNoReplace(stage / member, image) != index_file::WriteResult::OK ||
+        index_file::writeAtomicallyNoReplace(stage / "header", header) != index_file::WriteResult::OK ||
+        !renameTablespaceEntryNoReplace(stage, database / kCreateUndo, error)) {
+        std::filesystem::remove_all(stage, error);
+        return false;
+    }
+    return index_file::syncDirectory(database);
 }
 
 bool readCreateUndoHeader(const std::filesystem::path& journal, std::string& encoded) {
@@ -2351,7 +2437,8 @@ bool removeRetiredCreateUndo(const std::filesystem::path& database) {
             if (!readCreateUndoFile(entry->path(), create_table_undo::maxRecordBytes, bytes) ||
                 !bytes || *bytes != (name == "header" ? header : createUndoBinding(database, header)))
                 return false;
-        } else if (name != "catalog" && name != kCommentUndoMember && name.rfind(".dbms_atomic_", 0) != 0) {
+        } else if (name != "catalog" && name != kCommentUndoMember && name != kViewUndoMember &&
+                   name.rfind(".dbms_atomic_", 0) != 0) {
             std::optional<std::string> bytes;
             create_table_undo::Birth birth;
             if (!readCreateUndoFile(entry->path(), create_table_undo::maxRecordBytes, bytes) ||
@@ -6004,7 +6091,7 @@ DBStatus StorageEngine::createView(const std::string& dbname,
 DBStatus StorageEngine::renameView(const std::string& dbname,
                                    const std::string& oldName,
                                    const std::string& newName,
-                                   const std::function<void()>& prepareUndo) {
+                                   const std::function<void(bool)>& prepareUndo) {
     if (!prepareUndo) return DBStatus::INVALID_ARGUMENT;
     if (!validMetadataObjectName(oldName) || !validMetadataObjectName(newName))
         return DBStatus::INVALID_VALUE;
@@ -6034,7 +6121,7 @@ DBStatus StorageEngine::renameView(const std::string& dbname,
         changedTriggers = true;
     }
 
-    prepareUndo();
+    prepareUndo(changedTriggers);
     if (!renameTablespaceEntryNoReplace(source, destination, error))
         return error == std::errc::file_exists ? DBStatus::TABLE_ALREADY_EXISTS : DBStatus::IO_ERROR;
     if (!index_file::syncDirectory(destination.parent_path())) return DBStatus::IO_ERROR;
@@ -53372,17 +53459,8 @@ bool StorageEngine::ensureCreateUndoImage(const std::string& dbname, bool commen
             : captureCreateUndoCatalog(directory, header, image);
         if (!captured ||
             (anchor != 0 && !wal->XLogFlush(anchor))) return false;
-        const auto stage = makeCreateUndoStage(directory);
-        if (stage.empty()) return false;
-        if (index_file::writeAtomicallyNoReplace(stage / (commentsOnly ? kCommentUndoMember : "catalog"), image) !=
-                index_file::WriteResult::OK ||
-            index_file::writeAtomicallyNoReplace(stage / "header", header) !=
-                index_file::WriteResult::OK ||
-            !renameTablespaceEntryNoReplace(stage, journal, error)) {
-            std::filesystem::remove_all(stage, error);
+        if (!publishCreateUndo(directory, commentsOnly ? kCommentUndoMember : "catalog", image, header))
             return false;
-        }
-        if (!index_file::syncDirectory(directory)) return false;
     } else {
         std::optional<std::string> header;
         create_table_undo::Header owner;
@@ -53438,12 +53516,14 @@ bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
         return false;
 
     std::map<std::string, std::map<uint64_t, std::string>> births;
-    bool hasCatalog = false, hasComments = false;
+    bool hasCatalog = false, hasComments = false, hasView = false;
     for (const auto& entry : std::filesystem::directory_iterator(journal)) {
         const auto name = entry.path().filename().string();
         if (name == "catalog") hasCatalog = true;
         if (name == kCommentUndoMember) hasComments = true;
-        if (name == "header" || name == "catalog" || name == kCommentUndoMember || name == "retired" ||
+        if (name == kViewUndoMember) hasView = true;
+        if (name == "header" || name == "catalog" || name == kCommentUndoMember ||
+            name == kViewUndoMember || name == "retired" ||
             name == kCreateUndoCleanupMember ||
             name.rfind(".dbms_atomic_", 0) == 0)
             continue;
@@ -53457,6 +53537,7 @@ bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
     }
     create_table_undo::Header owner;
     if (!header || !create_table_undo::decodeHeader(*header, owner)) return false;
+    if (hasView && (hasCatalog || hasComments || !births.empty())) return false;
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex());
         if (activeTransactions().count(owner.xid)) return false;
@@ -53467,15 +53548,20 @@ bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
         wal->currentWriteLsn() < owner.anchorLsn) return false;
     if (excludedByTarget) {
         // A recycled or forked WAL history cannot rule out another commit
-        // whose annotation changes are already in the before-image.
+        // whose metadata changes are already in the before-image.
         if (wal->timelineId() != 1 || wal->earliestAvailableLsn() != 0 ||
-            !hasComments || hasCatalog || !births.empty() ||
+            (!hasComments && !hasView) || hasCatalog || !births.empty() ||
             std::any_of(excludedByTarget->begin(), excludedByTarget->end(),
                         [&](uint64_t xid) { return xid != owner.xid; })) return false;
     }
     const bool ownerExcluded = excludedByTarget && excludedByTarget->count(owner.xid);
     if (committed.count(owner.xid) || (aborted.count(owner.xid) && !ownerExcluded)) {
-        if (excludedByTarget) {
+        if (excludedByTarget && hasView) {
+            std::optional<std::string> image;
+            ViewUndoFiles before;
+            if (!readCreateUndoFile(journal / kViewUndoMember, kCreateUndoImageLimit, image) ||
+                !image || !decodeViewUndo(*image, createUndoBinding(directory, *header), before)) return false;
+        } else if (excludedByTarget) {
             std::optional<std::string> comments;
             CreateUndoFiles before;
             if (!readCreateUndoFile(journal / kCommentUndoMember, kCreateUndoImageLimit, comments) ||
@@ -53526,7 +53612,7 @@ bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
                 std::filesystem::file_type::regular || error) return false;
         return std::filesystem::remove(path, error) && !error;
     };
-    if (!restoreCreateUndoCatalog(directory, journal, !births.empty())) return false;
+    if (!restoreCreateUndoFiles(directory, journal, !births.empty())) return false;
     for (const auto& table : owned) {
         for (const auto& path : table.files) {
             if (!removeFile(path)) return false;
@@ -59771,7 +59857,7 @@ std::function<bool()> StorageEngine::prepareCommentUndo(const std::string& dbnam
     const auto journal = root / kCreateUndo;
     if (!createUndoImageStartsWith(journal / kCommentUndoMember, "CTUA1") &&
         !createUndoImageStartsWith(journal / "catalog", "CTUC4")) return {};
-    transactionContext().hasCommentUndo = true;
+    transactionContext().hasScopedMetadataUndo = true;
     const auto description = root / kDescriptionPath;
     const auto compatibility = root / kCommentsPath;
     std::optional<std::string> oldDescription, oldCompatibility;
@@ -59789,6 +59875,54 @@ std::function<bool()> StorageEngine::prepareCommentUndo(const std::string& dbnam
         clearCatalogSnapshot();
         return true;
     };
+}
+
+bool StorageEngine::prepareViewRenameUndo(const std::string& dbname,
+    const std::vector<std::string>& viewNames, bool changeDependencies, bool changeTriggers) {
+    const auto directory = dbPath(dbname);
+    const auto error = [] { return DbError("58030", "could not save files before changing the view"); };
+    if (!beginCreateTableUndo(dbname) || !viewUndoDirectories(directory) ||
+        !removeRetiredCreateUndo(directory)) throw error();
+    WALManager* wal = getWAL(dbname);
+    if (!wal) throw error();
+    const Lsn anchor = wal->currentWriteLsn();
+    const auto header = create_table_undo::encodeHeader(
+        {transactionContext().currentTxnId, wal->timelineId(), anchor});
+    if (header.empty()) throw error();
+
+    std::set<std::string> paths{kClassPath};
+    if (changeDependencies) paths.emplace(kDependPath);
+    if (changeTriggers) paths.emplace(".triggers");
+    for (const auto& view : viewNames)
+        paths.emplace(".views/" + view + ".view");
+    std::string image = "CTUV1" + createUndoBinding(directory, header);
+    for (const auto& path : paths) {
+        if (!validViewUndoPath(path)) throw error();
+        const auto file = directory / path;
+        struct stat attributes {};
+        if (::lstat(file.c_str(), &attributes) != 0) {
+            if (errno != ENOENT) throw error();
+        } else {
+            if (!S_ISREG(attributes.st_mode) || attributes.st_size < 0) throw error();
+            if ((attributes.st_mode & 07000) != 0) return false;
+        }
+        const auto overhead = 2 + path.size() + 2 + 8 + create_table_undo::digestBytes;
+        if (image.size() > kCreateUndoImageLimit - overhead ||
+            static_cast<uint64_t>(attributes.st_size) > kCreateUndoImageLimit - image.size() - overhead)
+            return false;
+        std::optional<std::string> bytes;
+        if (!readCreateUndoFile(file, kCreateUndoImageLimit - image.size() - overhead, bytes)) throw error();
+        relation_name_codec::append(image, path.size(), 2);
+        image += path;
+        relation_name_codec::append(image, bytes ? attributes.st_mode & 0777 : 0, 2);
+        relation_name_codec::append(image, bytes ? bytes->size() + 1 : 0, 8);
+        if (bytes) image += *bytes;
+    }
+    image += SHA256::hash(image);
+    if ((anchor != 0 && !wal->XLogFlush(anchor)) ||
+        !publishCreateUndo(directory, kViewUndoMember, image, header)) throw error();
+    transactionContext().hasScopedMetadataUndo = true;
+    return true;
 }
 
 void StorageEngine::lockDatabaseForDdl() {
@@ -60095,7 +60229,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionContext().accessedTemporaryObjects = false;
     transactionContext().truncateUndo.reset();
     transactionContext().scopedDdlCommitUncertain = false;
-    transactionContext().hasCommentUndo = false;
+    transactionContext().hasScopedMetadataUndo = false;
     transactionContext().transactionBackupDirty = false;
     transactionContext().restoreBackupBeforeRowUndo = false;
     transactionContext().txnLogSizeAtBackup = 0;
@@ -60756,7 +60890,7 @@ DBStatus StorageEngine::commitTransaction() {
     const Lsn commitLsn = noEffects ? INVALID_LSN : walXactCommit(committingDb, committingTxnId);
     if (!noEffects && (commitLsn == INVALID_LSN || !wal->XLogFlush(commitLsn))) {
         releaseCommitHeapPageLocks();
-        if (committingContext.truncateUndo || committingContext.hasCommentUndo) {
+        if (committingContext.truncateUndo || committingContext.hasScopedMetadataUndo) {
             // A failed append or sync can leave a readable COMMIT record.
             // Keep the before-image and prevent a contradictory live undo.
             committingContext.scopedDdlCommitUncertain = true;
@@ -61977,7 +62111,7 @@ DBStatus StorageEngine::rollbackTransaction() {
         uint64_t owner = 0;
         if (!createUndoOwner(dbPath(rollbackDb), owner) ||
             (owner != 0 && (owner != rollbackContext.currentTxnId ||
-             !restoreCreateUndoCatalog(dbPath(rollbackDb), dbPath(rollbackDb) / kCreateUndo)))) {
+             !restoreCreateUndoFiles(dbPath(rollbackDb), dbPath(rollbackDb) / kCreateUndo)))) {
             ddlUndoOk = false;
         } else if (owner != 0) {
             if (catalogService_) catalogService_->evict(rollbackDb);

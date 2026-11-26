@@ -12742,6 +12742,7 @@ bool DdlExecutor::executeAlterView(const AlterObjectStmt* stmt, Session& s) {
         if (stmt->ifExists &&
             !resolve(g_engine.catalogService().get(s.currentDB))) return skipMissing();
 
+        const bool standalone = !g_engine.inTransaction();
         DdlTransaction txn(s);
         txn.enableSnapshotRollback();
         if (!txn.begin(DdlTransaction::SnapshotTiming::BeforeChange))
@@ -12807,7 +12808,16 @@ bool DdlExecutor::executeAlterView(const AlterObjectStmt* stmt, Session& s) {
                                          relation->relname, target->nspname, newName);
         const auto definition = move ? pinMovedViewWriteTarget(catalog, s.currentDB, relation->oid, from)
                                      : std::nullopt;
-        const auto status = g_engine.renameView(s.currentDB, from, to, [&] {
+        bool scopedUndo = false;
+        const auto status = g_engine.renameView(s.currentDB, from, to, [&](bool changeTriggers) {
+            if (standalone) {
+                std::vector<std::string> changedViews{from, to};
+                for (const auto& plan : plans) {
+                    if (plan.changed) changedViews.push_back(plan.name);
+                }
+                scopedUndo = g_engine.prepareViewRenameUndo(s.currentDB, changedViews, move, changeTriggers);
+                if (scopedUndo) return;
+            }
             if (!txn.prepareSnapshot())
                 throw DbError("58030", "could not save files before renaming view");
             txn.markSnapshotDirty();
@@ -12834,11 +12844,13 @@ bool DdlExecutor::executeAlterView(const AlterObjectStmt* stmt, Session& s) {
         } else if (!catalog.renameClass(relation->oid, newName)) {
             throw DbError("XX001", "renamed view is missing from the catalog");
         }
-        if (!catalog.persistAll())
+        if (!(scopedUndo ? catalog.persistViewRelations(move) : catalog.persistAll()))
             throw DbError("58030", "could not save renamed view in the catalog");
         publishDependentViewRenames(catalog, s.currentDB, plans, txn);
         txn.recordUpdate(DdlObjectKind::View, from, to);
-        return !txn.commit();
+        if (txn.commit()) return false;
+        if (scopedUndo) throw DbError("58030", "could not commit ALTER VIEW");
+        return true;
     } catch (const DbError& error) {
         std::cout << "ERROR: " << error.what() << std::endl;
         return true;

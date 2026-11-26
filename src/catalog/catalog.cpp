@@ -3247,7 +3247,7 @@ CatalogImageSet CatalogManager::serializeAllLocked(WriteScope scope) const {
         images.emplace(name, image.str());
     };
 
-    if (scope != WriteScope::Namespaces) {
+    if (scope == WriteScope::All || scope == WriteScope::Descriptions) {
         persist("description", [&](std::ostream& out) {
             for (const auto& row : descriptions_) {
                 writeOid(out, row.objoid); out << ',';
@@ -3261,14 +3261,16 @@ CatalogImageSet CatalogManager::serializeAllLocked(WriteScope scope) const {
     }
 
     // pg_namespace
-    persist("namespace", [&](std::ostream& out) {
-        for (const auto& r : namespaces_) {
-            writeOid(out, r.oid); out << ',';
-            writeString(out, r.nspname); out << ',';
-            writeOid(out, r.nspowner); out << '\n';
-        }
-    });
-    if (scope == WriteScope::Namespaces) return result;
+    if (scope == WriteScope::All || scope == WriteScope::Namespaces) {
+        persist("namespace", [&](std::ostream& out) {
+            for (const auto& r : namespaces_) {
+                writeOid(out, r.oid); out << ',';
+                writeString(out, r.nspname); out << ',';
+                writeOid(out, r.nspowner); out << '\n';
+            }
+        });
+        if (scope == WriteScope::Namespaces) return result;
+    }
 
     // pg_class
     persist("class", [&](std::ostream& out) {
@@ -3310,6 +3312,23 @@ CatalogImageSet CatalogManager::serializeAllLocked(WriteScope scope) const {
             out << '\n';
         }
     });
+
+    if (scope == WriteScope::Relations) return result;
+
+    // pg_depend
+    persist("depend", [&](std::ostream& out) {
+        for (const auto& r : depends_) {
+            writeOid(out, r.classid); out << ',';
+            writeOid(out, r.objid); out << ',';
+            out << r.objsubid << ',';
+            writeOid(out, r.refclassid); out << ',';
+            writeOid(out, r.refobjid); out << ',';
+            out << r.refobjsubid << ',';
+            out << r.deptype;
+            out << '\n';
+        }
+    });
+    if (scope == WriteScope::RelationsAndDependencies) return result;
 
     // pg_attribute
     persist("attribute", [&](std::ostream& out) {
@@ -3402,20 +3421,6 @@ CatalogImageSet CatalogManager::serializeAllLocked(WriteScope scope) const {
                 << ',' << hexEncode(owner.second) << '\n';
         for (const auto& [owner, key] : primaryKeys_)
             out << "P1," << key.oid << ',' << owner << ',' << key.index << '\n';
-    });
-
-    // pg_depend
-    persist("depend", [&](std::ostream& out) {
-        for (const auto& r : depends_) {
-            writeOid(out, r.classid); out << ',';
-            writeOid(out, r.objid); out << ',';
-            out << r.objsubid << ',';
-            writeOid(out, r.refclassid); out << ',';
-            writeOid(out, r.refobjid); out << ',';
-            out << r.refobjsubid << ',';
-            out << r.deptype;
-            out << '\n';
-        }
     });
 
     // pg_authid
@@ -3518,6 +3523,11 @@ bool CatalogManager::persistDescriptions() {
     return persistAllImpl(false, WriteScope::Descriptions) == PersistResult::Published;
 }
 
+bool CatalogManager::persistViewRelations(bool changedDependencies) {
+    const auto scope = changedDependencies ? WriteScope::RelationsAndDependencies : WriteScope::Relations;
+    return persistAllImpl(false, scope) == PersistResult::Published;
+}
+
 CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace, WriteScope scope) {
     std::error_code pathError;
     const auto catalogPath = std::filesystem::weakly_canonical(dbPath_, pathError);
@@ -3531,7 +3541,9 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace,
     const bool scoped = scope != WriteScope::All;
     // A scoped write still checks the entire generation. The full
     // publisher owns missing-file repair and peer reload, if either is needed.
-    if (scoped && !persistence_->baseline.count(images.begin()->first))
+    if (scoped && std::any_of(images.begin(), images.end(), [&](const auto& image) {
+            return !persistence_->baseline.count(image.first);
+        }))
         return PersistResult::RefreshRequired;
     const auto& catalogFiles = scoped ? persistence_->baseline : images;
     std::map<std::string, CatalogFileGeneration> current;
@@ -3620,7 +3632,9 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace,
         if (reusable) reusable->save();
         if (image.first == "namespace") invalidateNamespaceReads();
     }
-    if (oidGen_ && !oidGen_->persist()) ok = false;
+    // Renaming a view cannot allocate a catalog object ID.
+    if (oidGen_ && scope != WriteScope::Relations && scope != WriteScope::RelationsAndDependencies &&
+        !oidGen_->persist()) ok = false;
     return ok ? PersistResult::Published : PersistResult::Failed;
 }
 

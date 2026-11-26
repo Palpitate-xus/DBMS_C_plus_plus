@@ -81,8 +81,16 @@ def main():
         wire.command("ROLLBACK TO before_rename", "ROLLBACK", ready=b"T")
         assert view_oid("original") == oid
         wire.command("COMMIT", "COMMIT")
+        assert view_oid("original") == oid
 
-        extended.command('ALTER /* object type */ VIEW original RENAME TO "New View"', "ALTER VIEW")
+        catalog_dir = fixture / "info" / "pg_catalog"
+        unchanged = [catalog_dir / "pg_depend.cat", catalog_dir / "pg_attribute.cat"]
+        inodes = [path.stat().st_ino for path in unchanged]
+        os.mkfifo(blocker)
+        wire.command('ALTER /* object type */ VIEW original RENAME TO "New View"', "ALTER VIEW")
+        blocker.unlink()
+        assert [path.stat().st_ino for path in unchanged] == inodes
+        assert not list(fixture.glob("info/.create_table_undo*"))
         assert view_oid('"New View"') == oid
         wire.query("SELECT id FROM original", state="42P01", tag=None)
         dependent([("1", "7"), ("2", "8")])
@@ -121,7 +129,7 @@ def main():
         wire.command("INSERT INTO other.renamed VALUES (20)", "INSERT 0 1")
         wire.command('CREATE VIEW joined AS SELECT "New View".id AS left_id, renamed.id AS right_id '
                      'FROM "New View" CROSS JOIN other.renamed', "CREATE VIEW")
-        wire.command('ALTER VIEW "New View" RENAME TO renamed', "ALTER VIEW")
+        extended.command('ALTER VIEW "New View" RENAME TO renamed', "ALTER VIEW")
         wire.query("SELECT left_id, right_id FROM joined WHERE left_id=1",
                    rows=[("1", "20")], fields=[("left_id", 23), ("right_id", 23)])
 

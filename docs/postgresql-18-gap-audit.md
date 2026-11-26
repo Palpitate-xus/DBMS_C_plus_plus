@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 缩小视图改名和移动的备份范围
+
+通过简单查询协议单独执行普通视图改名或移动时，只保存该命令会改动的文件。`BACKUP-01`、`TXN-05` 和 `WAL-07` 仍为部分实现。显式事务、扩展查询协议和文件超过日志容量时仍需整库备份，视图改动还需要数据库写锁。 [功能测试](test-report.md#alter-view-file-undo-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-file-undo-cost-20261126)
+
 ## 2026-11-26 · 在同一数据库内移动普通视图
 
 `ALTER VIEW [IF EXISTS] ... SET SCHEMA` 可以在用户模式之间移动普通视图，保留目录编号、注释、触发器及查询和写入所用的原始数据表。保存点回滚及进程退出后的恢复经过验证。视图自己的行类型、系统模式间移动和只锁定涉及对象的实现仍有差距。`CAT-16`、`SQL-11` 和 `TXN-05` 保持部分实现。 [功能测试](test-report.md#alter-view-set-schema-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-set-schema-cost-20261126)

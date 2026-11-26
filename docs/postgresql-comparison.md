@@ -2,17 +2,23 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 改视图时只保存会变动的文件
+
+PostgreSQL 修改视图所在模式时更新关系目录、模式依赖和行类型，重启按预写日志重放修改。SQLite 的回滚日志在写入数据库前保存涉及页面的旧内容。DuckDB 用预写日志记录提交，由检查点把日志内容写回数据库文件。 [PostgreSQL 视图迁移实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L17829-L17910) · [PostgreSQL WAL](https://www.postgresql.org/docs/18/wal-intro.html) · [SQLite 原子提交](https://www.sqlite.org/atomiccommit.html#creating_a_rollback_journal_file) · [DuckDB CHECKPOINT](https://duckdb.org/docs/2.0/sql/statements/checkpoint)
+
+本项目通过简单查询协议单独执行普通视图改名或移动时，在改写前保存相关定义、目录文件和触发器的旧版本。重启用事务日志判定是否保留修改。显式事务和扩展查询协议继续使用整库备份，视图修改仍持有数据库写锁。 [功能测试](test-report.md#alter-view-file-undo-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-file-undo-cost-20261126)
+
 ## 2026-11-26 · 在同一数据库内移动普通视图
 
 PostgreSQL 先锁定源视图，再检查执行者能否在目标模式创建对象。它改写关系的目录记录和模式依赖，视图的行类型也会移动。DuckDB 的 `ALTER VIEW` 文档展示事务内改名，依赖该视图的定义需要单独更新。SQLite 的视图文档介绍创建和删除，`ALTER TABLE` 用于修改表。 [PostgreSQL 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L17765-L17910) · [DuckDB ALTER VIEW](https://duckdb.org/docs/2.0/sql/statements/alter_view.html) · [SQLite CREATE VIEW](https://www.sqlite.org/lang_createview.html) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html)
 
-本项目保留视图的编号并更新模式依赖。由于依赖视图保存的是 SQL，移动时还会改写并重新检查引用。实际移动依赖整库快照来恢复，视图行类型和只锁定涉及对象的实现仍有差距。 [功能测试](test-report.md#alter-view-set-schema-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-set-schema-cost-20261126)
+本项目保留视图的编号并更新模式依赖。由于依赖视图保存的是 SQL，移动时还会改写并重新检查引用。视图行类型和只锁定涉及对象的实现仍有差距。 [功能测试](test-report.md#alter-view-set-schema-20261126) · [初版性能报告](performance-report-2026-10-30.md#alter-view-set-schema-cost-20261126)
 
 ## 2026-11-26 · 普通视图改名
 
 PostgreSQL 修改目录中的关系名称和该视图的行类型名，其他对象继续按编号引用它。DuckDB 的视图改名随事务提交或回滚，依赖该视图的定义需要单独更新。SQLite 的 `ALTER TABLE` 改名适用于表。 [PostgreSQL ALTER VIEW](https://www.postgresql.org/docs/18/sql-alterview.html) · [PostgreSQL 改名实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L4022-L4102) · [DuckDB ALTER VIEW](https://duckdb.org/docs/current/sql/statements/alter_view) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html)
 
-本项目保留视图的目录编号，并把依赖它的普通视图写成指向新名字的查询。支持的触发器随视图改名。真正改名仍需整库回滚备份，视图的行类型尚未实现。 [功能测试](test-report.md#alter-view-rename-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-rename-cost-20261126)
+本项目保留视图的目录编号，并把依赖它的普通视图写成指向新名字的查询。支持的触发器随视图改名。视图的行类型尚待实现。 [功能测试](test-report.md#alter-view-rename-20261126) · [初版性能报告](performance-report-2026-10-30.md#alter-view-rename-cost-20261126)
 
 ## 2026-11-26 · 回滚备份少读一遍文件
 

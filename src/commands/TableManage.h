@@ -273,7 +273,10 @@ public:
     // View support
     DBStatus createView(const std::string& dbname, const std::string& viewname, const std::string& sql);
     DBStatus renameView(const std::string& dbname, const std::string& oldName,
-                        const std::string& newName, const std::function<void()>& prepareUndo);
+                        const std::string& newName, const std::function<void(bool)>& prepareUndo);
+    // Returns false if the image exceeds the journal's size limit.
+    bool prepareViewRenameUndo(const std::string& dbname, const std::vector<std::string>& viewNames,
+                               bool changeDependencies, bool changeTriggers);
     DBStatus dropView(const std::string& dbname, const std::string& viewname);
     bool viewExists(const std::string& dbname, const std::string& viewname) const;
     std::string getViewSQL(const std::string& dbname, const std::string& viewname) const;
@@ -2788,7 +2791,7 @@ private:
         bool transactionBackupDirty = false;
         std::shared_ptr<TruncateUndoContext> truncateUndo;
         bool scopedDdlCommitUncertain = false;
-        bool hasCommentUndo = false;
+        bool hasScopedMetadataUndo = false;
         std::shared_ptr<void> createTableUndoFence;
         bool createTableUndoCleanupFailed = false;
         bool restoreBackupBeforeRowUndo = false;

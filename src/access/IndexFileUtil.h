@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <fcntl.h>
 #include <string>
 #include <sys/stat.h>
@@ -64,7 +65,8 @@ enum class DirectorySync { Once, RetryOnce };
 inline WriteResult writeAtomicallyImpl(const std::filesystem::path& target,
                                        const std::string& bytes,
                                        bool noReplace,
-                                       DirectorySync directorySync = DirectorySync::Once) {
+                                       DirectorySync directorySync = DirectorySync::Once,
+                                       std::optional<mode_t> mode = std::nullopt) {
     static std::atomic<uint64_t> sequence{0};
     const auto parent = target.parent_path().empty()
         ? std::filesystem::path(".") : target.parent_path();
@@ -94,6 +96,7 @@ inline WriteResult writeAtomicallyImpl(const std::filesystem::path& target,
         if (n <= 0) { ok = false; break; }
         written += static_cast<size_t>(n);
     }
+    if (ok && mode && ::fchmod(fd, *mode) != 0) ok = false;
     if (ok && ::fsync(fd) != 0) ok = false;
     if (::close(fd) != 0) ok = false;
 
@@ -147,8 +150,9 @@ inline WriteResult writeAtomicallyImpl(const std::filesystem::path& target,
 // be mistaken for a valid index after a crash.
 inline bool writeAtomically(const std::filesystem::path& target,
                             const std::string& bytes,
-                            DirectorySync directorySync = DirectorySync::Once) {
-    return writeAtomicallyImpl(target, bytes, false, directorySync) == WriteResult::OK;
+                            DirectorySync directorySync = DirectorySync::Once,
+                            std::optional<mode_t> mode = std::nullopt) {
+    return writeAtomicallyImpl(target, bytes, false, directorySync, mode) == WriteResult::OK;
 }
 
 inline WriteResult writeAtomicallyNoReplace(

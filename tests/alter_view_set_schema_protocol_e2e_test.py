@@ -73,8 +73,16 @@ def main():
         wire.command("ROLLBACK TO before_move", "ROLLBACK", ready=b"T")
         assert view_id("origin.report") == original_id
         wire.command("COMMIT", "COMMIT")
+        assert view_id("origin.report") == original_id
 
+        catalog_dir = fixture / "info" / "pg_catalog"
+        unchanged = [catalog_dir / "pg_attribute.cat", catalog_dir / "pg_description.cat"]
+        inodes = [path.stat().st_ino for path in unchanged]
+        os.mkfifo(blocker)
         wire.command('ALTER VIEW origin.report SET SCHEMA "Archive West"', "ALTER VIEW")
+        blocker.unlink()
+        assert [path.stat().st_ino for path in unchanged] == inodes
+        assert not list(fixture.glob("info/.create_table_undo*"))
         assert view_id('"Archive West".report') == original_id
         wire.query("SELECT id FROM origin.report", state="42P01", tag=None)
         wire.query('''SELECT obj_description('"Archive West".report'::regclass, 'pg_class') AS note''',

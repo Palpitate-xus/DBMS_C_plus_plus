@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>给视图改名或换位置更快 · 2026-11-26</summary>
+
+在额外建了 64 张空表的磁盘测试中，单独移动视图的中位耗时从 532–644 毫秒缩短到 67–90 毫秒。
+
+[测试报告](docs/test-report.md#alter-view-file-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-file-undo-cost-20261126)
+
+</details>
+
+<details>
 <summary>可以给视图换个位置 · 2026-11-26</summary>
 
 可以把 `sales.monthly` 移到 `archive.monthly`。视图仍然使用原来的数据表，依赖它的查询也能继续运行。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>改表时少读一遍备份文件 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 改表时少读一遍备份文件
 
 在额外建了 128 张表的磁盘测试中，改表名的时间从约 1.8 秒缩短到约 1.1 秒。
 
 [测试报告](docs/test-report.md#transaction-backup-copy-20261126) · [性能报告](docs/performance-report-2026-10-30.md#transaction-backup-copy-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 修改表时可以跳过不存在的表
 

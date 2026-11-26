@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 back up only changed files for standalone ALTER VIEW renames and moves",
+      "gap_ids": ["BACKUP-01", "TXN-05", "WAL-07"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "src/commands/DdlExecutor.cpp", "src/catalog/catalog.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/alter_view_rename_protocol_e2e_test.py", "tests/alter_view_set_schema_protocol_e2e_test.py"],
+      "verification": [
+        "Change a view with an unrelated uncopyable file present and check that untouched catalog files remain in place.",
+        "Interrupt writes before and after the commit record is durable, then check definitions, relation identity, dependencies, permissions and triggers.",
+        "Compare statement latency and saved bytes with the previous full backup at matching database sizes."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 move ordinary views between schemas in one database",
       "gap_ids": ["CAT-16", "SQL-11", "TXN-05"],
       "status": "partial",
