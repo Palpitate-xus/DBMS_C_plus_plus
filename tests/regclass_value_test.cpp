@@ -46,6 +46,15 @@ int main() {
         rows("SELECT 'public.reference_target'::regclass::text",{{"reference_target"}});
         rows("SELECT ' public.\"Mixed Name\" '::regclass::oid",{{std::to_string(quoted->oid)}});
         rows("SELECT 0::regclass::oid,(-1::integer)::regclass::oid,4294967295::regclass::oid",{{"0","4294967295","4294967295"}});
+        const char* columnQuery = "SELECT attname FROM pg_catalog.pg_attribute "
+            "WHERE attrelid=$1::pg_catalog.text::pg_catalog.regclass AND attnum>0";
+        const QueryBindingDatum name{"catalog:name", "name", "text", {}, true, "reference_target", 1};
+        auto catalogQuery = std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(database, columnQuery, {name}));
+        auto catalogPlan = QueryPlanner::buildPreparedQueryPlan(&g_engine, database, catalogQuery, catalogQuery->ast.get());
+        auto catalogResult = QueryPlanner::executePlanChecked(std::move(catalogPlan));
+        catalogResult.throwIfFailed();
+        need(catalogResult.structuredRows == std::vector<std::vector<std::string>>{{"k"}},
+             "typed statement parameter resolves to the actual column catalog row");
         rows("SELECT seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle FROM pg_sequence WHERE seqrelid='reference_generator'::regclass",
             {{std::to_string(sequence->oid),"21","3","2","32767","1","1","f"}});
         for(const auto& item:std::vector<std::pair<std::string,std::string>>{

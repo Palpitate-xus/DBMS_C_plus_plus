@@ -142,10 +142,13 @@ inline std::vector<std::vector<ExprValue>> classRows(const CatalogManager::Metad
         if (!relation || row.oid == *relation) rows.push_back(classCells(row));
     return rows;
 }
-inline std::vector<std::vector<ExprValue>> attributeRows(const CatalogManager::MetadataSnapshot& snapshot,
-                                                        std::optional<Oid> relation = std::nullopt) {
+inline void validateAttributeRead(const CatalogManager::MetadataSnapshot& snapshot) {
     validateRead(snapshot,1249,"pg_attribute",75,270,attributeFields,20);
     if(snapshot.systemAttributesMaterialized)system_attributes::validateAll(snapshot.relations,snapshot.attributes,snapshot.types);
+}
+inline std::vector<std::vector<ExprValue>> attributeRows(const CatalogManager::MetadataSnapshot& snapshot,
+                                                        std::optional<Oid> relation = std::nullopt) {
+    validateAttributeRead(snapshot);
     std::vector<std::vector<ExprValue>> rows;
     if (!relation) rows.reserve(snapshot.attributes.size());
     for (const auto& row : snapshot.attributes)

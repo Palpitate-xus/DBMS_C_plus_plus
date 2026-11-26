@@ -7,6 +7,7 @@
 #include "catalog/TypeCatalogScan.h"
 #include "catalog/CatalogJoinFilters.h"
 #include "catalog/SystemCatalogRows.h"
+#include "catalog/CatalogAttributeScan.h"
 #include "catalog/PgInheritanceCatalog.h"
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
@@ -21561,6 +21562,7 @@ class PreparedWithDmlRuntime {
             shared_ptr<dbms::PreparedQueryRows> virtualRows;
             shared_ptr<optional<dbms::PreparedQueryRows>> statisticsRows;
             shared_ptr<dbms::TypeCatalogScan> typeRows;
+            shared_ptr<dbms::CatalogAttributeScan> attributeRows;
             bool collationRows = false;
             dbms::TableSchema scanSchema;
             if(item->type==dbms::FromItem::Type::Subquery || item->type==dbms::FromItem::Type::Function) {
@@ -21583,9 +21585,8 @@ class PreparedWithDmlRuntime {
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_class") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgClassRows(session_, catalogFilter(1)));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_attribute") {
-                virtualRows=make_shared<dbms::PreparedQueryRows>(dbms::system_catalog::attributeRows(
-                    g_engine.catalogService().metadataSnapshot(session_.currentDB, false),
-                    dbms::attributeCatalogRelationFilter(range)));
+                attributeRows=make_shared<dbms::CatalogAttributeScan>(range, query_->ast.get());
+                attributeRows->capture(g_engine.catalogService(),session_.currentDB);
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_type") {
                 typeRows = make_shared<dbms::TypeCatalogScan>(dbms::typeCatalogOidFilter(range), false);
                 // A sibling can run a routine that changes the catalog. Keep
@@ -21660,7 +21661,7 @@ class PreparedWithDmlRuntime {
             };
             auto lookupBindings = (typeRows || collationRows) ? catalogLookupBindings(range) : vector<dbms::QueryColumnBinding>{};
             if (!lookupBindings.empty()) node->planAttributes["catalogOidLookup"] = "true";
-            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,statisticsRows,typeRows,
+            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,statisticsRows,typeRows,attributeRows,
                         collationRows,scanOpened,source=node.get(),ordinality=item->withOrdinality,
                         lookupBindings=std::move(lookupBindings),lookupOid=optional<dbms::Oid>{}]
                 (size_t index,dbms::RowContext& row) mutable {
@@ -21673,6 +21674,7 @@ class PreparedWithDmlRuntime {
                     if(index<(**statisticsRows).size()){cells=(**statisticsRows)[index];found=true;}
                 }
                 else if(typeRows) found=typeRows->read(g_engine.catalogService(),session_.currentDB,index,cells,lookupOid);
+                else if(attributeRows) found=attributeRows->read(g_engine,session_.currentDB,query_->parameters,index,cells);
                 else if(collationRows) {
                     const auto& entries = dbms::collation_catalog::collations;
                     auto entry = entries.end();

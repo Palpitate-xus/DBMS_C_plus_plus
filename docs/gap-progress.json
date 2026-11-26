@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-26 narrow attribute scans using runtime table names",
+      "gap_ids": ["CAT-03", "QRY-01", "CLIENT-01"],
+      "status": "partial",
+      "evidence": ["src/catalog/CatalogAttributeScan.h", "src/catalog/TypeCatalogScan.h", "src/executor/ExecutionPlan.cpp", "src/main.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/format_type_protocol_e2e_test.py", "tests/regclass_value_test.cpp"],
+      "verification": [
+        "Use a proven built-in OID equality at the first predicate and take text values from the execution that demands the scan.",
+        "Keep predicate order, NULL handling and the remainder of the scan when a later expression changes the lookup.",
+        "Check named statements with changed arguments, search paths, renames and rollback; verify old data after restart."
+      ]
+    },
+    {
       "issue": "2026-11-26 look up relation names from runtime strings",
       "gap_ids": ["CAT-03", "QRY-01", "CLIENT-01"],
       "status": "partial",

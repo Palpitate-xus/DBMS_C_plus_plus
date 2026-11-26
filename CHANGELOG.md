@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>用查询参数查列信息更快 · 2026-11-26</summary>
+
+应用程序传入表名时，数据库可以先找到对应的表。在另有 128 张表的测试库里，列出四列的用时从约 320 毫秒降到约 17 毫秒。
+
+[使用说明](docs/MANUAL.md#查询列的类型) · [测试报告](docs/test-report.md#catalog-runtime-key-20261126) · [性能报告](docs/performance-report-2026-10-30.md#catalog-runtime-key-cost-20261126)
+
+</details>
+
+<details>
 <summary>可以从数据里的表名查编号 · 2026-11-26</summary>
 
 表名保存在文本列时，可以直接查到这张表的编号。表名只有数字也能查到，例如名为 `007` 的表。在另有 128 张表的测试库里，从 48 行文本查表编号快了约 11%。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按表编号查看列信息更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 按表编号查看列信息更快
 
 用表的数字编号查列名和类型时，更多写法可以直接找到这张表。在另有 32 张表的测试库里，列出四列的用时从约 97 毫秒降到约 5 毫秒。
 
 [测试报告](docs/test-report.md#typed-oid-catalog-filter-20261126) · [性能报告](docs/performance-report-2026-10-30.md#typed-oid-catalog-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 修复撤销表结构改动后关闭数据库时的崩溃
 

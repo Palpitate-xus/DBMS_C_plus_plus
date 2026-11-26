@@ -2840,6 +2840,18 @@ ORDER BY a.attnum;
 
 `format_type` 根据类型编号和列中保存的长度或精度生成类型名。也可以传入 `NULL` 作为第二个参数，只查看该类型的名称。类型被搜索路径中的同名类型挡住时，返回的名称会带上所属模式。 [验证记录](test-report.md#format-type-20261124)
 
+应用程序也可以把表名作为文本参数传入，例如 `public.orders`。把表名的等值条件放在第一项，可以让数据库先找到对应的表。
+
+```sql
+SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) AS declared_type
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid = $1::text::regclass
+  AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum;
+```
+
+未指定模式时，按当前搜索路径查找表名。 [参数查询测试](test-report.md#catalog-runtime-key-20261126)
+
 ### 从文本列查找表的编号
 
 假设 `tracked_tables` 的文本列 `table_name` 保存了表名。下面的查询会返回表名和编号。

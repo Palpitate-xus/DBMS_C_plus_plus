@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 用查询参数缩小列目录的读取范围
+
+直接查询 `pg_attribute` 时，先用实际内置 `regclass` 转换首个等值条件中的文本参数或文本值，再为匹配的列生成查询行。查找遇到空值、同名的其他类型或不同的表编号时，继续由原有条件筛选。子查询、联接和混合目录筛选仍需单独验证和优化。`CAT-03`、`QRY-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#catalog-runtime-key-20261126) · [性能对照](performance-report-2026-10-30.md#catalog-runtime-key-cost-20261126)
+
 ## 2026-11-26 · 执行时按文本查表
 
 从 `text` 或 `varchar` 转成 `regclass` 时按表名查找，包括由数字组成的表名。普通表查询中可以直接写 `列名::regclass`。读取名称和显示形式只需要查对应的目录项，随后转换成数字可以复用已有表编号。参数仍在执行时查找，目录等值筛选尚无参数专用索引路径。 `CAT-03`、`QRY-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#regclass-runtime-20261126) · [性能对照](performance-report-2026-10-30.md#regclass-runtime-cost-20261126)

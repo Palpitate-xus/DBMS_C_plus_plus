@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 用查询参数指定要查看的表
+
+PostgreSQL 的索引扫描在执行时计算依赖运行时数据的查找值，重新扫描时会重算。SQLite 将等值条件的右侧求值写入用于查找的寄存器。DuckDB 在支持提前筛选的扫描中遇到参数时，可在执行时重新绑定筛选条件。 [PostgreSQL 18.6 索引扫描源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeIndexscan.c#L504-L610) · [SQLite 3.51.0 等值条件源码](https://github.com/sqlite/sqlite/blob/version-3.51.0/src/wherecode.c#L775-L805) · [DuckDB 1.4.2 条件筛选源码](https://github.com/duckdb/duckdb/blob/v1.4.2/src/optimizer/pushdown/pushdown_get.cpp#L8-L30)
+
+本项目在直接查询 `pg_attribute`、第一项条件按对象编号等值筛选时，可先用文本参数查找表编号，再为匹配的列生成查询行。参数值来自本次执行。后续表达式如果改变了查找结果，扫描按原顺序继续交给查询自身筛选。目录元数据仍取自整份快照。 [测试](test-report.md#catalog-runtime-key-20261126) · [性能对照](performance-report-2026-10-30.md#catalog-runtime-key-cost-20261126)
+
 ## 2026-11-26 · 从文本查找表
 
 PostgreSQL 18.6 将 `text` 和 `varchar` 转成 `regclass` 时按关系名查找。显示结果时按对象编号读取目录缓存，再决定是否带上模式名。SQLite 的 `PRAGMA table_xinfo` 先定位指定的表，再遍历它的列。DuckDB 按名称查到候选目录项后，选择当前事务可见的版本。 [PostgreSQL 18.6 转换和输出源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/regproc.c) · [PostgreSQL 18.6 转换声明](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_cast.dat#L247-L250) · [SQLite 3.51.0 表信息源码](https://github.com/sqlite/sqlite/blob/version-3.51.0/src/pragma.c#L1158-L1205) · [DuckDB 1.4.2 目录查找源码](https://github.com/duckdb/duckdb/blob/v1.4.2/src/catalog/catalog_set.cpp#L538-L550)

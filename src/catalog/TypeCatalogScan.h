@@ -40,15 +40,15 @@ inline std::optional<Oid> catalogOidLiteralValue(const Expr* input, bool allowQu
 
 // Admit only a direct equality on this range's OID column and a decimal
 // constant that is lossless as an OID. The original filter still runs.
-inline std::optional<Oid> catalogOidLiteralFilter(const PreparedQuery::SourceRange& range,
-                                                bool firstConjunct, int16_t attributeNumber = 1) {
+inline const Expr* catalogOidEqualityInput(const PreparedQuery::SourceRange& range,
+    bool firstConjunct, int16_t attributeNumber = 1, bool allowBoundOidEquality = false) {
     const auto* select = dynamic_cast<const SelectStmt*>(range.owner);
-    if (!select || range.source != select->fromClause.get()) return std::nullopt;
+    if (!select || range.source != select->fromClause.get()) return nullptr;
     const auto field = std::find_if(range.columns.begin(), range.columns.end(), [&](const auto& column) {
         return column.physicalAttributeNumber == attributeNumber && column.typeOid == 26;
     });
     if (field == range.columns.end())
-        return std::nullopt;
+        return nullptr;
     const size_t ordinal = field - range.columns.begin();
     const Expr* predicate = select->whereClause.get();
     if (firstConjunct) {
@@ -60,9 +60,14 @@ inline std::optional<Oid> catalogOidLiteralFilter(const PreparedQuery::SourceRan
         }
     }
     const auto* equality = dynamic_cast<const BinaryOpExpr*>(predicate);
-    if (!equality || equality->op != "=" || equality->preparedSubquery ||
-        equality->comparison || equality->predicateCollation)
-        return std::nullopt;
+    if (!equality || equality->op != "=" || equality->preparedSubquery || equality->predicateCollation)
+        return nullptr;
+    if (equality->comparison) {
+        const auto& binding = *equality->comparison;
+        if (!allowBoundOidEquality || !binding.strict || binding.enumTypeOid ||
+            !binding.collation.empty() || binding.identity != "builtin-comparison:=(oid,oid)")
+            return nullptr;
+    }
     const auto oidColumn = [&](const Expr* expression) {
         const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
         return column && !column->preparedSubquery && column->binding &&
@@ -70,9 +75,14 @@ inline std::optional<Oid> catalogOidLiteralFilter(const PreparedQuery::SourceRan
                column->binding->sourceOrdinal == range.ordinal &&
                column->binding->columnOrdinal == ordinal && column->binding->typeOid == 26;
     };
-    if (oidColumn(equality->left.get())) return catalogOidLiteralValue(equality->right.get(), firstConjunct);
-    if (oidColumn(equality->right.get())) return catalogOidLiteralValue(equality->left.get(), firstConjunct);
-    return std::nullopt;
+    if (oidColumn(equality->left.get())) return equality->right.get();
+    if (oidColumn(equality->right.get())) return equality->left.get();
+    return nullptr;
+}
+
+inline std::optional<Oid> catalogOidLiteralFilter(const PreparedQuery::SourceRange& range,
+                                                bool firstConjunct, int16_t attributeNumber = 1) {
+    return catalogOidLiteralValue(catalogOidEqualityInput(range, firstConjunct, attributeNumber), firstConjunct);
 }
 
 inline std::optional<Oid> typeCatalogOidFilter(const PreparedQuery::SourceRange& range) {

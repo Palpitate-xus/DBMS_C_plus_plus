@@ -84,6 +84,58 @@ def check_prepared_regclass(wire, is_postgres):
     assert b"".join(kind for kind, _ in frames) == b"3Z", frames
 
 
+def check_runtime_catalog_key(wire, is_postgres):
+    sql = ("SELECT attname FROM pg_catalog.pg_attribute "
+           "WHERE attrelid=$1::pg_catalog.text::pg_catalog.regclass AND attnum>0")
+    name = b"runtime_catalog_key"
+    sync = wire.packet(b"S")
+    assert b"".join(kind for kind, _ in wire.exchange(wire.parse(sql, name, (25,)) + sync)) == b"1Z"
+
+    def check(argument, rows=(), tag="SELECT 1", ready=b"I", state=None):
+        frames = wire.exchange(wire.bind(name, (argument,)) + wire.describe_portal() + wire.execute() + sync)
+        fields = [("attname", 19)] if state is None else None
+        wire.check(sql, frames, rows=rows, tag=tag, ready=ready, state=state, fields=fields)
+
+    wire.command("SET search_path=format_a,format_b,public", "SET")
+    check(b"path_probe", [("first_column",)])
+    check(b"format_b.path_probe", [("second_column",)])
+    check(None, tag="SELECT 0")
+    check(b"format_a.gone", tag=None, state="42P01")
+    wire.command("BEGIN", "BEGIN", ready=b"T")
+    wire.command("ALTER TABLE format_a.path_probe RENAME TO moved_probe", "ALTER TABLE", ready=b"T")
+    check(b"path_probe", [("second_column",)], ready=b"T")
+    wire.command("ROLLBACK", "ROLLBACK")
+    check(b"path_probe", [("first_column",)])
+    frames = wire.exchange(wire.packet(b"C", b"S" + name + b"\0") + sync)
+    assert b"".join(kind for kind, _ in frames) == b"3Z", frames
+
+    if not is_postgres:
+        base = "SELECT attname FROM pg_catalog.pg_attribute WHERE "
+        wire.query(base + "false AND attrelid='format_a.gone'::text::regclass",
+                   fields=[("attname", 19)], tag="SELECT 0")
+        wire.query(base + "attrelid='format_a.gone'::text::regclass AND false", state="42P01", tag=None)
+        wire.query(base + "attrelid=NULL::text::regclass AND 1/0=0", state="22012", tag=None)
+        wire.query(base + "attrelid='format_a.path_probe'::text::regclass LIMIT 0",
+                   fields=[("attname", 19)], tag="SELECT 0")
+        wire.query(base + "attrelid='format_a.gone'::text::regclass LIMIT 0", state="42P01", tag=None)
+        wire.command("CREATE TABLE format_a.switch_probe(first_column int, another_column int)", "CREATE TABLE")
+        wire.command("CREATE TABLE format_b.switch_probe(second_column int)", "CREATE TABLE")
+        wire.command("CREATE FUNCTION format_a.switch_directory() RETURNS boolean VOLATILE LANGUAGE plpgsql "
+                     "AS $$BEGIN SET search_path TO format_b,format_a,public; RETURN true; END;$$",
+                     "CREATE FUNCTION")
+        key = "attrelid='switch_probe'::text::regclass AND attnum>0"
+        wire.query(base + key + " AND format_a.switch_directory()",
+                   rows=[("first_column",), ("another_column",)], fields=[("attname", 19)], tag="SELECT 2")
+        wire.query(base + key, rows=[("second_column",)], fields=[("attname", 19)])
+        wire.command("SET search_path=format_a,format_b,public", "SET")
+        wire.command("CREATE OR REPLACE FUNCTION format_a.switch_directory() RETURNS boolean VOLATILE LANGUAGE plpgsql "
+                     "AS $$BEGIN SET search_path TO public; RETURN true; END;$$", "CREATE FUNCTION")
+        wire.query(base + key + " AND format_a.switch_directory()",
+                   rows=[("first_column",), ("another_column",)], fields=[("attname", 19)], tag="SELECT 2")
+        wire.query(base + key, state="42P01", tag=None)
+    wire.command("SET search_path=public", "SET")
+
+
 def check_runtime_regclass(wire):
     wire.command('CREATE TABLE format_a."Case.Table"(id integer)', "CREATE TABLE")
     wire.command('CREATE TABLE format_a."007"(id integer)', "CREATE TABLE")
@@ -216,6 +268,7 @@ def main():
                 "REGCLASS 'format_a.format_probe'=a.attrelid",
                 "a.attrelid=CAST('format_a.format_probe' AS pg_catalog.regclass)::oid",
                 "a.attrelid='format_a.format_probe'::text::regclass",
+                "CAST(CAST('format_a.format_probe' AS text) AS pg_catalog.regclass)::oid=a.attrelid",
             ):
                 mode.query(columns_by_oid.format(equality=equality), rows=DECLARATIONS,
                            fields=fields, tag=f"SELECT {len(DECLARATIONS)}")
@@ -236,8 +289,12 @@ def main():
             earlier = "1/(CASE WHEN a.attrelid='1249'::oid THEN 0 ELSE 1 END)=1"
             wire.query(columns_by_oid.format(equality=f"{earlier} AND a.attrelid='{table_oid}'::oid"),
                        state="22012", tag=None)
+            wire.query(columns_by_oid.format(equality=f"{earlier} AND a.attrelid='format_a.format_probe'::text::regclass"),
+                       state="22012", tag=None)
             for value in (f"'{table_oid}'::oid", "'format_a.format_probe'::regclass",
-                          "CAST('format_a.format_probe' AS pg_catalog.regclass)::oid"):
+                          "CAST('format_a.format_probe' AS pg_catalog.regclass)::oid",
+                          "'format_a.format_probe'::text::regclass",
+                          "CAST('format_a.format_probe'::text AS pg_catalog.regclass)::oid"):
                 sql = columns_by_oid.format(equality=f"a.attrelid={value}")
                 frames = wire.send_statements("EXPLAIN (FORMAT JSON, ANALYZE TRUE, TIMING FALSE) " + sql)
                 assert not any(kind == b"E" for kind, _ in frames), frames
@@ -246,6 +303,7 @@ def main():
                            if node["nodeType"] == "TypedSource"]
                 assert plan["actualRows"] == len(DECLARATIONS) and sources == [len(DECLARATIONS) + 6], plan
         check_prepared_regclass(wire, review.server is None)
+        check_runtime_catalog_key(wire, review.server is None)
 
         display("'format_a.status'::regtype", "format_a.status")
         display("'format_a.status[]'::regtype", "format_a.status[]")

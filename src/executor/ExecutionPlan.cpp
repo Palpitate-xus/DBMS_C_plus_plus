@@ -1,6 +1,7 @@
 #include "common/OidInput.h"
 #include "commands/InheritanceGraph.h"
 #include "catalog/SystemCatalogRows.h"
+#include "catalog/CatalogAttributeScan.h"
 #include "catalog/PgDefaultCatalog.h"
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
@@ -7783,22 +7784,28 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
             const bool attributes=found->relationName=="pg_attribute";
             const bool methods=found->relationName==access_method_catalog::name;
             const bool collations=found->relationName==collation_catalog::name;
-            const auto relation = attributes ? attributeCatalogRelationFilter(*found) : std::nullopt;
-            auto rows=std::make_shared<std::optional<PreparedQueryRows>>();
-            source=std::make_unique<PreparedSourceRowsOp>(found->columns,
-                [engine,database,rows,attributes,methods,collations,relation](size_t index,std::vector<ExprValue>& row) {
-                    if(!*rows) {
-                        if (methods) *rows = access_method_catalog::rows();
-                        else if (collations) *rows = collation_catalog::rows();
-                        else {
-                            const auto metadata = engine->catalogService().metadataSnapshot(database, false);
-                            *rows = attributes ? system_catalog::attributeRows(metadata, relation)
-                                : system_catalog::classRows(metadata);
+            if (attributes) {
+                auto rows = std::make_shared<CatalogAttributeScan>(*found, query->ast.get());
+                source = std::make_unique<PreparedSourceRowsOp>(found->columns,
+                    [engine,database,query,rows](size_t index,std::vector<ExprValue>& row) {
+                        return rows->read(*engine,database,query->parameters,index,row);
+                    });
+            } else {
+                auto rows=std::make_shared<std::optional<PreparedQueryRows>>();
+                source=std::make_unique<PreparedSourceRowsOp>(found->columns,
+                    [engine,database,rows,methods,collations](size_t index,std::vector<ExprValue>& row) {
+                        if(!*rows) {
+                            if (methods) *rows = access_method_catalog::rows();
+                            else if (collations) *rows = collation_catalog::rows();
+                            else {
+                                const auto metadata = engine->catalogService().metadataSnapshot(database, false);
+                                *rows = system_catalog::classRows(metadata);
+                            }
                         }
-                    }
-                    if(index>=(**rows).size())return false;
-                    row=(**rows)[index];return true;
-                });
+                        if(index>=(**rows).size())return false;
+                        row=(**rows)[index];return true;
+                    });
+            }
         } else if(found->relationSchema=="pg_catalog" &&
                   (found->relationName=="pg_attrdef" || found->relationName=="pg_depend")) {
             for(const auto& output:found->columns) {
