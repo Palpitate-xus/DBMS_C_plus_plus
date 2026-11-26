@@ -1,18 +1,18 @@
 # 更新日志
 
 <details>
-<summary>按编号统计注释更快 · 2026-11-26</summary>
+<summary>按编号统计表注释更快 · 2026-11-26</summary>
 
-在有 1,024 条额外注释的测试库里，按编号条件统计注释从约 264 毫秒降到约 28 毫秒。
+在额外写入 1,024 条列注释的测试库里，按编号范围统计表注释，从约 264 毫秒缩短到约 28 毫秒。
 
 [测试报告](docs/test-report.md#oid-comparison-20261126) · [性能报告](docs/performance-report-2026-10-30.md#oid-comparison-cost-20261126)
 
 </details>
 
 <details>
-<summary>可以查看注释查询怎么执行 · 2026-11-26</summary>
+<summary>可以查看数据库怎样查找注释 · 2026-11-26</summary>
 
-用 `EXPLAIN` 可以查看查询注释的步骤。程序也能按名字找到注释目录 `pg_description`。
+想知道数据库怎样查找表或列的注释，可以在查询前加上 `EXPLAIN` 查看步骤。
 
 [使用说明](docs/MANUAL.md#查看对象注释) · [测试报告](docs/test-report.md#description-relation-20261126) · [性能报告](docs/performance-report-2026-10-30.md#description-relation-cost-20261126)
 
@@ -21,7 +21,7 @@
 <details>
 <summary>修改注释所需的临时备份更小 · 2026-11-26</summary>
 
-在另有 128 张表的测试库里，只修改一条注释时，临时备份从约 131 KB 降到不到 1 KB。
+在额外建了 128 张表的测试库里，修改一条注释时，为了能撤销修改而保留的临时备份，从约 131 KB 缩小到不到 1 KB。
 
 [测试报告](docs/test-report.md#comment-compact-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#comment-compact-undo-cost-20261126)
 
