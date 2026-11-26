@@ -45,7 +45,10 @@ inline const PgClassRow* lookup(const CatalogManager::QualifiedName& name,
     const auto visible=freezeDeclaredTypeNamespace(session);
     const auto schemas=name.schema.empty()?visible.schemas:std::vector<std::string>{name.schema};
     for(auto schema:schemas) {
-        if(schema=="pg_temp")schema=visible.temporarySchema;
+        if(schema=="pg_temp") {
+            schema=visible.temporarySchema;
+            if(schema.empty())continue;
+        }
         const auto space=std::find_if(catalog.namespaces.begin(),catalog.namespaces.end(),
             [&](const auto& row){return row.nspname==schema;});
         if(space==catalog.namespaces.end())continue;
@@ -74,8 +77,7 @@ inline Oid textInputOid(const std::string& input,const CatalogManager::MetadataS
     const auto name=parseName(input,database);
     if(const auto* relation=lookup(name,catalog,session))return relation->oid;
     if(!name.schema.empty()) {
-        const auto schema=name.schema=="pg_temp"
-            ? (session?sessionTempSchemaName(*session):std::string{}) : name.schema;
+        const auto schema=name.schema=="pg_temp" ? activeTemporarySchema(session) : name.schema;
         if(std::none_of(catalog.namespaces.begin(),catalog.namespaces.end(),
                        [&](const auto& row){return row.nspname==schema;}))
             throw DbError("3F000","schema \""+name.schema+"\" does not exist");

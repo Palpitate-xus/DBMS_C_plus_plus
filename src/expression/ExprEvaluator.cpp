@@ -7666,7 +7666,10 @@ ExprValue ExprEvaluator::evalSqlValue(const FunctionCallExpr* e,const RowContext
             engine->catalogService().metadataSnapshot(database);
         for(const auto& entry:path) {
             auto name=expandSessionSearchPathEntry(entry,session?session->username:std::string{});
-            if(name=="pg_temp" && session)name=sessionTempSchemaName(*session);
+            if(name=="pg_temp") {
+                name=activeTemporarySchema(session);
+                if(name.empty())continue;
+            }
             if(name=="pg_catalog")return nameValue(name);
             const bool present=std::any_of(metadata.namespaces.begin(),metadata.namespaces.end(),
                 [&](const auto& ns){return ns.nspname==name;});

@@ -8,6 +8,8 @@
 
 表名可以带上当前数据库，例如 `shop.public.orders`。指定其他数据库返回 `0A000`。模式不存在时，显式文本转换返回 `3F000`，直接输入的 `regclass` 字面量返回 `42P01`。 [名称解析测试](test-report.md#regclass-qualified-database-20261126)
 
+新库不预置临时模式。旧库里的 `pg_temp_1` 目录记录由原数据保留，`pg_temp` 按当前连接实际使用的临时模式解析。回滚首次创建后，显式文本转换返回 `3F000`。成功创建之后，删除临时对象或执行 `DISCARD TEMP` 仍保留本连接的临时模式。 [临时模式测试](test-report.md#lazy-temp-namespace-20261126)
+
 ## 2026-11-24 · 系统目录函数的返回类型
 
 查询绑定到内置 `format_type`、`pg_get_indexdef`、`pg_get_constraintdef` 或 `pg_get_expr` 时，执行沿用该调用确定的结果类型。明确使用 `pg_catalog` 的调用保留内置函数的文本结果。未指定模式的调用按搜索路径及参数类型选择函数。 [测试报告](test-report.md#bound-catalog-results-20261124)

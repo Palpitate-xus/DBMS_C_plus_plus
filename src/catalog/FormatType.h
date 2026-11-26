@@ -104,12 +104,8 @@ inline std::string format(StorageEngine& engine, const std::string& database,
 
     const auto path = effectiveRelationSearchPath(session);
     if (builtin && builtin->typnamespace == 11) {
-        // With pg_catalog first, an immutable built-in identity cannot be
-        // shadowed. The implicit temp namespace matters once it is created.
-        auto first = path.begin();
-        if (session && !session->tempNamespaceCreated && first != path.end() &&
-            *first == sessionTempSchemaName(*session)) ++first;
-        if (first != path.end() && *first == "pg_catalog")
+        // With pg_catalog first, an immutable built-in identity cannot be shadowed.
+        if (!path.empty() && path.front() == "pg_catalog")
             return catalogName(*builtin, typmod) + (builtin->oid == oid ? "" : "[]");
     }
 

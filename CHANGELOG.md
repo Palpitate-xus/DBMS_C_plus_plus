@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查找不存在的临时表时，错误提示更准确 · 2026-11-26</summary>
+
+查临时表的编号时，报错会区分当前连接还没创建过临时表或序列，还是已经创建过但找不到指定的表。
+
+[使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#lazy-temp-namespace-20261126) · [性能报告](docs/performance-report-2026-10-30.md#lazy-temp-namespace-cost-20261126)
+
+</details>
+
+<details>
 <summary>查表编号时可以带上当前数据库名 · 2026-11-26</summary>
 
 连接到 `shop` 数据库后，可以用 `shop.public.orders` 查订单表的编号。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以用保存的表名查表编号 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 可以用保存的表名查表编号
 
 如果一列保存的是表名，可以在查询里把它转换成数据库给这张表分配的编号。像 `007` 这样只含数字的表名也能查到。
 
 [使用说明](docs/MANUAL.md#从文本列查找表的编号) · [测试报告](docs/test-report.md#regclass-runtime-20261126) · [性能报告](docs/performance-report-2026-10-30.md#regclass-runtime-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 直接在 SQL 里写表名，查看列信息更快
 

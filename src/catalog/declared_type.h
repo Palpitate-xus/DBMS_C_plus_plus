@@ -1,4 +1,5 @@
 #pragma once
+#include "catalog/RelationSearchPath.h"
 #include "catalog/catalog.h"
 #include "catalog/type_registry.h"
 #include "catalog/systables.h"
@@ -22,19 +23,7 @@ struct DeclaredTypeNamespace {
     std::string temporarySchema;
 };
 inline DeclaredTypeNamespace freezeDeclaredTypeNamespace(const Session* session) {
-    DeclaredTypeNamespace result;
-    std::string canonical;
-    if(!session || !parseSessionSearchPath(session->searchPath,result.schemas,canonical))
-        result.schemas={"public"};
-    for(auto& schema:result.schemas)
-        schema=expandSessionSearchPathEntry(schema,session?session->username:"");
-    if(std::find(result.schemas.begin(),result.schemas.end(),"pg_catalog")==result.schemas.end())
-        result.schemas.insert(result.schemas.begin(),"pg_catalog");
-    if(session) {
-        result.temporarySchema=sessionTempSchemaName(*session);
-        result.schemas.insert(result.schemas.begin(),result.temporarySchema);
-    }
-    return result;
+    return {effectiveRelationSearchPath(session), activeTemporarySchema(session)};
 }
 
 // A copied catalog generation owns named declarations; syntax aliases select
@@ -89,17 +78,12 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
         std::vector<std::string> schemas;
         if(!requested.schema.empty())schemas.push_back(requested.schema);
         else if(frozenNamespace)schemas=frozenNamespace->schemas;
-        else {
-            std::string canonical;
-            if(!session || !parseSessionSearchPath(session->searchPath,schemas,canonical))schemas={"public"};
-            for(auto& schema:schemas)schema=expandSessionSearchPathEntry(schema,session?session->username:"");
-            if(std::find(schemas.begin(),schemas.end(),"pg_catalog")==schemas.end())schemas.insert(schemas.begin(),"pg_catalog");
-            if(session)schemas.insert(schemas.begin(),sessionTempSchemaName(*session));
-        }
+        else schemas=effectiveRelationSearchPath(session);
         for(auto schema:schemas) {
-            if(schema=="pg_temp" && frozenNamespace && !frozenNamespace->temporarySchema.empty())
-                schema=frozenNamespace->temporarySchema;
-            else if(schema=="pg_temp" && session)schema=sessionTempSchemaName(*session);
+            if(schema=="pg_temp") {
+                schema=frozenNamespace?frozenNamespace->temporarySchema:activeTemporarySchema(session);
+                if(schema.empty())throw DbError("3F000","schema \"pg_temp\" does not exist");
+            }
             Oid namespaceOid=INVALID_OID;
             for(const auto& space:catalog->namespaces)if(space.nspname==schema){namespaceOid=space.oid;break;}
             if(!namespaceOid) {

@@ -2483,7 +2483,7 @@ const std::vector<PgNamespaceRow>& CatalogManager::builtinNamespaceRows() {
     // Catalog reload can run from the global engine destructor. These
     // immutable declarations must outlive every catalog and engine owner.
     static const auto* rows=new const std::vector<PgNamespaceRow>{
-        {11,"pg_catalog",10},{99,"pg_toast",10},{2200,"public",10},{1213,"pg_temp_1",10}
+        {11,"pg_catalog",10},{99,"pg_toast",10},{2200,"public",10}
     };
     return *rows;
 }

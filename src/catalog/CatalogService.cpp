@@ -830,14 +830,11 @@ std::pair<Oid, std::string> CatalogService::resolveRegclass(const std::string& d
     const auto catalog = database.empty() ? ReadCatalog{} : readCatalog(database, ownership.mayReadCurrentFiles);
     CatalogManager::QualifiedName name;
     std::string requiredSchema;
-    auto namespacePath = freezeDeclaredTypeNamespace(session);
-    for (auto& schema : namespacePath.schemas)
-        if (schema == "pg_temp") schema = namespacePath.temporarySchema;
+    const auto namespacePath = freezeDeclaredTypeNamespace(session);
     if (!oid) {
         name = regclass_detail::parseName(input, database);
         if (textInput) requiredSchema = name.schema;
         if (name.schema == "pg_temp") {
-            // A standalone native caller has no temporary namespace.
             if (namespacePath.temporarySchema.empty()) {
                 if (textInput) throw DbError("3F000", "schema \"pg_temp\" does not exist");
                 throw DbError("42P01", "relation \"" + input + "\" does not exist");

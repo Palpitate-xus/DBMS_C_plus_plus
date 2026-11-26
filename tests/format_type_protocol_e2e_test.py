@@ -164,14 +164,6 @@ def check_qualified_regclass(wire, table_oid):
     wire.check(scan, frames, rows=[(column,) for column, _ in DECLARATIONS],
                fields=[("attname", 19)], tag=f"SELECT {len(DECLARATIONS)}")
 
-    wire.command("CREATE TEMP TABLE qualified_temp_probe(id integer)", "CREATE TABLE")
-    temp_oid = wire.client.data_row_values(
-        wire.send_statements("SELECT 'pg_temp.qualified_temp_probe'::regclass::oid"))[0][0].decode()
-    wire.query(f"SELECT '{db_name}.pg_temp.qualified_temp_probe'::text::regclass::oid AS id",
-               rows=[(temp_oid,)], fields=[("id", 26)])
-    wire.query(f"SELECT '{db_name}.pg_temp.no_table'::text::regclass", state="42P01", tag=None)
-    wire.command("DROP TABLE pg_temp.qualified_temp_probe", "DROP TABLE")
-
     wire.command(f"CREATE TABLE format_a.qualified_reference(id int, ref regclass DEFAULT '{target}')",
                  "CREATE TABLE")
     wire.command(f"INSERT INTO format_a.qualified_reference VALUES (1,DEFAULT),(2,'{target}')", "INSERT 0 2")
@@ -185,6 +177,51 @@ def check_qualified_regclass(wire, table_oid):
                fields=fields, tag="SELECT 2", ready=b"T")
     wire.command("ROLLBACK", "ROLLBACK")
     wire.query(query, rows=[original] * 2, fields=fields, tag="SELECT 2")
+
+
+def check_temporary_regclass(wire):
+    database = wire.client.data_row_values(wire.send_statements("SELECT current_database()"))[0][0].decode()
+    db_name = '"' + database.replace('"', '""') + '"'
+    table = f"{db_name}.pg_temp.qualified_temp_probe"
+
+    def missing(state):
+        for extended in (False, True):
+            mode = Wire(wire.client, wire.sock, extended)
+            mode.query(f"SELECT '{table}'::regclass", state="42P01", tag=None)
+            mode.query(f"SELECT '{table}'::text::regclass", state=state, tag=None)
+
+    wire.command("SET search_path=pg_temp,public", "SET")
+    missing("3F000")
+    for savepoint in (False, True):
+        wire.command("BEGIN", "BEGIN", ready=b"T")
+        if savepoint:
+            wire.command("SAVEPOINT before_temp", "SAVEPOINT", ready=b"T")
+        wire.command("CREATE TEMP TABLE qualified_temp_probe(id integer)", "CREATE TABLE", ready=b"T")
+        if savepoint:
+            wire.command("ROLLBACK TO SAVEPOINT before_temp", "ROLLBACK", ready=b"T")
+            # The error must be rolled back before the transaction can proceed.
+            wire.query(f"SELECT '{table}'::text::regclass", state="3F000", tag=None, ready=b"E")
+        wire.command("ROLLBACK", "ROLLBACK")
+        missing("3F000")
+
+    wire.command("CREATE TEMP TABLE qualified_temp_probe(id integer)", "CREATE TABLE")
+    temp_oid = wire.client.data_row_values(
+        wire.send_statements("SELECT 'pg_temp.qualified_temp_probe'::regclass::oid"))[0][0].decode()
+    wire.query(f"SELECT '{table}'::text::regclass::oid AS id",
+               rows=[(temp_oid,)], fields=[("id", 26)])
+    wire.command("CREATE TABLE format_a.qualified_temp_probe(id integer)", "CREATE TABLE")
+    permanent_oid = wire.client.data_row_values(
+        wire.send_statements("SELECT 'format_a.qualified_temp_probe'::regclass::oid"))[0][0].decode()
+    for path, oid in (("format_a,pg_temp,public", permanent_oid), ("pg_temp,format_a,public", temp_oid)):
+        wire.command(f"SET search_path={path}", "SET")
+        wire.query("SELECT 'qualified_temp_probe'::text::regclass::oid AS id",
+                   rows=[(oid,)], fields=[("id", 26)])
+    wire.command("DROP TABLE format_a.qualified_temp_probe", "DROP TABLE")
+    wire.command("DROP TABLE pg_temp.qualified_temp_probe", "DROP TABLE")
+    missing("42P01")
+    wire.command("DISCARD TEMP", "DISCARD TEMP")
+    missing("42P01")
+    wire.command("SET search_path=public", "SET")
 
 
 def check_runtime_regclass(wire):
@@ -356,6 +393,7 @@ def main():
         check_prepared_regclass(wire, review.server is None)
         check_runtime_catalog_key(wire, review.server is None)
         check_qualified_regclass(wire, table_oid)
+        check_temporary_regclass(wire)
 
         display("'format_a.status'::regtype", "format_a.status")
         display("'format_a.status[]'::regtype", "format_a.status[]")

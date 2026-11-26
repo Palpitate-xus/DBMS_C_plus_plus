@@ -8,22 +8,27 @@
 
 namespace dbms {
 
+inline std::string activeTemporarySchema(const Session* session) {
+    return session && session->tempNamespaceCreated ? sessionTempSchemaName(*session) : std::string{};
+}
+
 inline std::vector<std::string> effectiveRelationSearchPath(const Session* session) {
     std::vector<std::string> path;
     std::string canonical;
     if (!session || !parseSessionSearchPath(session->searchPath, path, canonical))
         path = {"public"};
 
-    const std::string temporary = session ? sessionTempSchemaName(*session) : "";
+    const auto temporary = activeTemporarySchema(session);
     if (session) {
         for (auto& schema : path) {
             schema = expandSessionSearchPathEntry(schema, session->username);
             if (schema == "pg_temp") schema = temporary;
         }
+        path.erase(std::remove(path.begin(), path.end(), std::string{}), path.end());
     }
     if (std::find(path.begin(), path.end(), "pg_catalog") == path.end())
         path.insert(path.begin(), "pg_catalog");
-    if (session && std::find(path.begin(), path.end(), temporary) == path.end())
+    if (!temporary.empty() && std::find(path.begin(), path.end(), temporary) == path.end())
         path.insert(path.begin(), temporary);
     return path;
 }

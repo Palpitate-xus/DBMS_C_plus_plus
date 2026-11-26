@@ -16,6 +16,7 @@ int main() {
     CatalogManager mgr(dbPath);
     mgr.bootstrapSystemNamespaces();
     mgr.bootstrapSystemTypes();
+    assert(!mgr.getTempNamespace(1));
 
     // 两个会话各自创建临时 schema
     Oid ns1 = mgr.createTempNamespace(1001);

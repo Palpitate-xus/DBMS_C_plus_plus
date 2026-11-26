@@ -2,11 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 按连接识别临时模式
+
+PostgreSQL 18.6 在首次使用临时模式时才初始化它，按连接记录是否已经初始化。SQLite 在首次创建临时表时才创建临时数据库文件。DuckDB 把临时表放在当前连接的 `temp.main` 中。 [PostgreSQL 18.6 初始化源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L4133-L4252) · [SQLite 临时数据库](https://sqlite.org/tempfiles.html#temp_databases) · [DuckDB 1.4 临时表](https://duckdb.org/docs/1.4/sql/statements/create_table#temporary-tables)
+
+项目的新库也在首次使用时创建临时模式。通过 `pg_temp` 查表编号时，旧库中遗留的目录记录不会让尚未初始化的连接误报表不存在。还有一处行为不同。把 `pg_temp` 放到搜索路径首位时，PostgreSQL 的 `current_schema` 可以主动初始化临时模式，本项目只查询已存在的模式。 [测试](test-report.md#lazy-temp-namespace-20261126) · [PostgreSQL 18.6 搜索路径源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L4523-L4551)
+
 ## 2026-11-26 · 表名前带上数据库名
 
 PostgreSQL 将 `数据库名.模式名.表名` 中的数据库名与当前连接的数据库核对，再在指定模式中找表。显式文本转换和未定型字面量对缺失模式使用不同的错误码。SQLite 可以通过两段名称指定主库、临时库或附加数据库。DuckDB 支持分别指定目录和模式。 [PostgreSQL 18.6 名称查找源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L417-L504) · [PostgreSQL 18.6 转换源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/regproc.c#L817-L856) · [SQLite 对象名称](https://sqlite.org/lang_naming.html) · [DuckDB 1.4.2 目录查找源码](https://github.com/duckdb/duckdb/blob/v1.4.2/src/catalog/catalog.cpp#L395-L433)
 
-本项目的 `regclass` 输入现在可以带上当前数据库名。写其他库名返回 `0A000`。普通模式不存在时，文本或变长字符串转换返回 `3F000`，未定型字面量返回 `42P01`。新库预置的 `pg_temp_1` 让首个会话在创建临时表之前也能看到该模式，这时转换不存在的临时表名会返回 `42P01`，PostgreSQL 18.6 返回 `3F000`。 [用法](MANUAL.md#从文本列查找表的编号) · [测试](test-report.md#regclass-qualified-database-20261126)
+本项目的 `regclass` 输入现在可以带上当前数据库名。写其他库名返回 `0A000`。普通模式不存在时，文本或变长字符串转换返回 `3F000`，未定型字面量返回 `42P01`。 [用法](MANUAL.md#从文本列查找表的编号) · [测试](test-report.md#regclass-qualified-database-20261126)
 
 ## 2026-11-26 · 用查询参数指定要查看的表
 
