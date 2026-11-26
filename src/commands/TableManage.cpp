@@ -61292,9 +61292,68 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
     uint16_t currentSlotId = 0;
     decodeRid(entry.rowIdx, currentPageId, currentSlotId);
 
-    const auto publishStagedPage = [&](
-        uint32_t pageId, char* liveBuffer,
-        std::vector<char>& stagedBuffer, PageWrapper& stagedPage) {
+    const size_t headerSize = rowHeaderSize(tbl.formatVersion, tbl.len());
+    const auto matchesTuple = [&](const char* tuple, size_t length,
+                                  const std::string& payload) {
+        return length >= headerSize &&
+            stripRowHeader(tuple, length, tbl.formatVersion, tbl.len()) ==
+                payload;
+    };
+    const auto undoPage = [&](uint32_t pageId, bool restorePrevious,
+                              bool removeCurrent) {
+        if (!lockManager_.pageLockExclusive(dbname, tablename, pageId))
+            return false;
+        HeapPageGuard guard{lockManager_, *pa, dbname, tablename, pageId};
+        char* liveBuffer = pa->fetchPage(pageId);
+        if (!liveBuffer) return false;
+        guard.pinned = true;
+        PageWrapper page(liveBuffer, pa->pageSize(), tbl.formatVersion);
+        if (!page.isValid()) return false;
+
+        const char* previousTuple = nullptr;
+        size_t previousLength = 0;
+        if (restorePrevious &&
+            (!page.read(previousSlotId, previousTuple, previousLength) ||
+             !matchesTuple(previousTuple, previousLength, entry.rowData))) {
+            return false;
+        }
+        const char* currentTuple = nullptr;
+        size_t currentLength = 0;
+        const bool currentPresent = removeCurrent &&
+            page.read(currentSlotId, currentTuple, currentLength);
+        if (currentPresent &&
+            !matchesTuple(currentTuple, currentLength, currentRow)) {
+            return false;
+        }
+        if (!restorePrevious && !currentPresent) return true;
+
+        std::vector<char> stagedBuffer(liveBuffer, liveBuffer + pa->pageSize());
+        PageWrapper stagedPage(stagedBuffer.data(), pa->pageSize(),
+                               tbl.formatVersion);
+        // Restore OLD in its original slot, preserving xmin and the null bitmap.
+        if (restorePrevious) {
+            std::string restored = replaceRowData(
+                std::string(previousTuple, previousLength), entry.rowData,
+                tbl.formatVersion, tbl.len());
+            auto* header = castHeapHeader(restored.data());
+            header->t_fields.t_xmax = 0;
+            header->t_infomask &= ~(
+                HEAP_XMAX_COMMITTED | HEAP_XMAX_INVALID |
+                HEAP_XMAX_EXCL_LOCK | HEAP_XMAX_KEYSHR_LOCK |
+                HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_IS_MULTI | HEAP_UPDATED);
+            setRowCtid(
+                restored.data(), restored.size(), tbl.formatVersion,
+                ItemPointer{pageId, static_cast<OffsetNumber>(previousSlotId + 1)});
+            uint16_t restoredSlot = previousSlotId;
+            if (!stagedPage.update(
+                    previousSlotId, restored.data(), restored.size(), restoredSlot) ||
+                restoredSlot != previousSlotId) {
+                return false;
+            }
+        }
+        // NEW cannot be visible after rollback. A retry may find it removed.
+        if (currentPresent && !stagedPage.remove(currentSlotId)) return false;
+
         const Lsn beforeLsn = walPageImage(
             dbname, tablename, pageId, liveBuffer, pa->pageSize(), true);
         if (beforeLsn == INVALID_LSN) return false;
@@ -61317,96 +61376,14 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
         return pa->flush();
     };
 
-    // Restore OLD in its original slot, preserving its xmin and null bitmap.
-    bool previousRestored = false;
-    if (lockManager_.pageLockExclusive(
-            dbname, tablename, previousPageId)) {
-        char* previousPageBuffer = pa->fetchPage(previousPageId);
-        if (previousPageBuffer) {
-            PageWrapper page(
-                previousPageBuffer, pa->pageSize(), tbl.formatVersion);
-            const char* tuple = nullptr;
-            size_t tupleLength = 0;
-            if (page.isValid() &&
-                page.read(previousSlotId, tuple, tupleLength) &&
-                tupleLength >= rowHeaderSize(tbl.formatVersion, tbl.len()) &&
-                stripRowHeader(
-                    tuple, tupleLength, tbl.formatVersion, tbl.len()) ==
-                    entry.rowData) {
-                std::vector<char> stagedBuffer(
-                    previousPageBuffer,
-                    previousPageBuffer + pa->pageSize());
-                PageWrapper stagedPage(
-                    stagedBuffer.data(), pa->pageSize(),
-                    tbl.formatVersion);
-                std::string restored = replaceRowData(
-                    std::string(tuple, tupleLength), entry.rowData,
-                    tbl.formatVersion, tbl.len());
-                auto* header = castHeapHeader(restored.data());
-                header->t_fields.t_xmax = 0;
-                header->t_infomask &= ~(
-                    HEAP_XMAX_COMMITTED | HEAP_XMAX_INVALID |
-                    HEAP_XMAX_EXCL_LOCK | HEAP_XMAX_KEYSHR_LOCK |
-                    HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_IS_MULTI |
-                    HEAP_UPDATED);
-                setRowCtid(
-                    restored.data(), restored.size(), tbl.formatVersion,
-                    ItemPointer{
-                        previousPageId,
-                        static_cast<OffsetNumber>(previousSlotId + 1)});
-                uint16_t restoredSlot = previousSlotId;
-                if (stagedPage.update(
-                        previousSlotId, restored.data(), restored.size(),
-                        restoredSlot) &&
-                    restoredSlot == previousSlotId) {
-                    previousRestored = publishStagedPage(
-                        previousPageId, previousPageBuffer,
-                        stagedBuffer, stagedPage);
-                }
-            }
-            pa->unpinPage(previousPageId);
-        }
-        lockManager_.pageUnlock(dbname, tablename, previousPageId);
+    if (previousPageId == currentPageId) {
+        // Publish one WAL image and one heap write for both tuple changes.
+        heapOk = undoPage(previousPageId, true, true);
+    } else {
+        const bool previousRestored = undoPage(previousPageId, true, false);
+        const bool currentRemoved = undoPage(currentPageId, false, true);
+        heapOk = previousRestored && currentRemoved;
     }
-
-    // NEW is an aborted physical version after rollback and can be removed
-    // immediately; no snapshot is allowed to observe its xmin.
-    bool currentRemoved = false;
-    if (lockManager_.pageLockExclusive(
-            dbname, tablename, currentPageId)) {
-        char* currentPageBuffer = pa->fetchPage(currentPageId);
-        if (currentPageBuffer) {
-            PageWrapper page(
-                currentPageBuffer, pa->pageSize(), tbl.formatVersion);
-            const char* tuple = nullptr;
-            size_t tupleLength = 0;
-            if (page.isValid()) {
-                if (!page.read(currentSlotId, tuple, tupleLength)) {
-                    currentRemoved = true;
-                } else if (
-                    tupleLength >=
-                        rowHeaderSize(tbl.formatVersion, tbl.len()) &&
-                    stripRowHeader(
-                        tuple, tupleLength, tbl.formatVersion,
-                        tbl.len()) == currentRow) {
-                    std::vector<char> stagedBuffer(
-                        currentPageBuffer,
-                        currentPageBuffer + pa->pageSize());
-                    PageWrapper stagedPage(
-                        stagedBuffer.data(), pa->pageSize(),
-                        tbl.formatVersion);
-                    if (stagedPage.remove(currentSlotId)) {
-                        currentRemoved = publishStagedPage(
-                            currentPageId, currentPageBuffer,
-                            stagedBuffer, stagedPage);
-                    }
-                }
-            }
-            pa->unpinPage(currentPageId);
-        }
-        lockManager_.pageUnlock(dbname, tablename, currentPageId);
-    }
-    heapOk = previousRestored && currentRemoved;
 
     const auto containsRid = [](const std::vector<int64_t>& values,
                                 int64_t rid) {

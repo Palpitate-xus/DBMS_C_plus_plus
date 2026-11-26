@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 restore both row versions of an update with one write when they share a page",
+      "gap_ids": ["TXN-05", "WAL-05", "WAL-07"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/rollback_update_page_failure_test.cpp", "tests/mvcc_update_test.cpp", "tests/compat/cases/view_check_option.sql"],
+      "verification": [
+        "Verify page and slot identities, repeated savepoint rollback, and primary index restoration for same-page and separate-page updates.",
+        "Retry after a failed heap sync and restart after forced stops during page writeback.",
+        "Compare view-check failures and savepoint latency against the previous build and PostgreSQL 18.6, and count file writes and sync calls."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 enforce local and cascaded checks on new rows through projected views",
       "gap_ids": ["CAT-16", "DML-01", "DML-03", "TXN-05"],
       "status": "partial",

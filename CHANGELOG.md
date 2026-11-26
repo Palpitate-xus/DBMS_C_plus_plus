@@ -1,6 +1,17 @@
 # 更新日志
 
 <details>
+<summary>撤销更新时可以少写一次磁盘 · 2026-11-26</summary>
+
+更新前后的数据存放在同一页时，撤销更新只需把这页写一次。
+
+这也适用于被视图拒绝的更新，以及用 `ROLLBACK TO SAVEPOINT` 撤销的更新。
+
+[测试报告](docs/test-report.md#same-page-update-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#same-page-update-undo-cost-20261126)
+
+</details>
+
+<details>
 <summary>通过视图写入时可以检查新数据 · 2026-11-26</summary>
 
 例如，只显示正数的视图开启检查后，会拒绝把零或负数写进去。
@@ -23,18 +34,15 @@
 </details>
 
 <details>
-<summary>表的列改名后，还能通过视图改数据 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 表的列改名后，还能通过视图改数据
 
 例如，订单表的 `qty` 改名后，通过原有的单表视图写入 `qty`，值仍会存到原来对应的那一列。
 
 修改和删除也会遵守视图原来筛选数据的条件。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#writable-view-projection-20261126) · [性能报告](docs/performance-report-2026-10-30.md#writable-view-projection-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 表的列改名后，已有报表还能查
 

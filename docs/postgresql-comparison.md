@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 同一页上的更新只写一次就能撤销
+
+PostgreSQL 记录事务已撤销，读取时按事务状态判断哪些行版本可见。SQLite 的回滚日志模式会把数据页的旧内容写回数据库。DuckDB 撤销事务时会清理事务的本地存储，再用撤销缓冲区还原改动。 [PostgreSQL 事务撤销](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/transam/xact.c#L1650-L1727) · [SQLite 数据页恢复](https://www.sqlite.org/atomiccommit.html#rolling_back_incomplete_changes) · [DuckDB 事务撤销](https://github.com/duckdb/duckdb/blob/main/src/transaction/duck_transaction.cpp#L315-L323)
+
+本项目在撤销普通表的更新时恢复旧行、移除新行并修复索引。前后两个版本在同一页时，先生成同时包含两项改动的页，把它写入日志并同步，再写入数据文件。两个版本在不同页时分别处理。 [功能测试](test-report.md#same-page-update-undo-20261126) · [性能报告](performance-report-2026-10-30.md#same-page-update-undo-cost-20261126)
+
 ## 2026-11-26 · 通过视图写入时检查新行
 
 PostgreSQL 将视图条件加入写入计划。在表约束和唯一性检查之后，按从内层到外层的顺序检查最终行。`LOCAL` 检查本层，`CASCADED` 将检查传到下层。SQLite 的普通视图可以借助 `INSTEAD OF` 触发器写入。DuckDB 的 `CREATE VIEW` 文档描述了视图执行查询的方式。 [PostgreSQL 改写代码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/rewrite/rewriteHandler.c#L3614-L3679) · [PostgreSQL 写入时机](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeModifyTable.c#L1199-L1214) · [SQLite CREATE VIEW](https://www.sqlite.org/lang_createview.html) · [DuckDB CREATE VIEW](https://duckdb.org/docs/2.0/sql/statements/create_view)
@@ -18,7 +24,7 @@ PostgreSQL 直接更新 `pg_attribute` 里的列名，保留列编号。已经�
 
 PostgreSQL 根据视图查询树把写入目标映射到原表列，并给更新和删除附上视图的过滤条件。它也支持满足条件的嵌套视图以及 `WITH CHECK OPTION`。SQLite 的普通视图可以用 `INSTEAD OF` 触发器接收写入。DuckDB 的 `CREATE VIEW` 文档提供查询视图的用法。 [PostgreSQL 可更新视图](https://www.postgresql.org/docs/18/sql-createview.html#SQL-CREATEVIEW-UPDATABLE-VIEWS) · [PostgreSQL 重写实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/rewrite/rewriteHandler.c#L3075) · [SQLite CREATE VIEW](https://www.sqlite.org/lang_createview.html) · [DuckDB CREATE VIEW](https://duckdb.org/docs/2.0/sql/statements/create_view)
 
-本项目对受支持的单表视图按列在定义中的实际来源写入，查询结果仍使用视图公开的名称。隐藏列的默认值由数据表提供，更新和删除同时应用视图的条件。完整的视图重写和 `CHECK OPTION` 仍待覆盖。 [功能测试](test-report.md#writable-view-projection-20261126) · [性能报告](performance-report-2026-10-30.md#writable-view-projection-cost-20261126)
+本项目对受支持的单表视图按列在定义中的实际来源写入，查询结果仍使用视图公开的名称。隐藏列的默认值由数据表提供，更新和删除同时应用视图的条件。后续版本补上了这类视图的 `WITH CHECK OPTION`。 [功能测试](test-report.md#writable-view-projection-20261126) · [新行检查](test-report.md#view-check-option-20261126) · [性能报告](performance-report-2026-10-30.md#writable-view-projection-cost-20261126)
 
 ## 2026-11-26 · 表改列名后保留依赖视图的列和连接
 
