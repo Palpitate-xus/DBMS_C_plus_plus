@@ -1,35 +1,35 @@
 # 更新日志
 
 <details>
-<summary>只读视图会拒绝写入 · 2026-11-26</summary>
+<summary>不能再通过汇总视图改数据</summary>
 
-例如，通过汇总视图插入或删除数据时，数据库会报错，原表里的数据不会变。
+例如，按月统计销量的视图只供查询。试图通过它增删数据时，数据库会报错并保留原表的数据。
 
 这也覆盖只显示前几行、去重和排名的视图。通过普通可写视图修改数据时，仍会遵守视图的筛选条件。
 
-[测试报告](docs/test-report.md#read-only-view-writes-20261126) · [性能报告](docs/performance-report-2026-10-30.md#read-only-view-write-cost-20261126)
+2026-11-26 · [测试报告](docs/test-report.md#read-only-view-writes-20261126) · [性能报告](docs/performance-report-2026-10-30.md#read-only-view-write-cost-20261126)
 
 </details>
 
 <details>
-<summary>已有视图也能开启或关闭写入检查 · 2026-11-26</summary>
+<summary>已有视图可以拒绝不符合条件的数据</summary>
 
-例如，可以给已有的报表视图开启检查，让它拒绝写入不符合筛选条件的数据。
+例如，一个视图只显示有库存的商品。开启检查后，通过这个视图把库存改成零就会报错。这项检查也可以关闭。
 
 视图的列名和注释会保留，依赖它的查询也可以继续使用。
 
-[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#alter-view-check-option-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-check-option-cost-20261126)
+2026-11-26 · [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#alter-view-check-option-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-check-option-cost-20261126)
 
 </details>
 
 <details>
-<summary>撤销更新时可以少写一次磁盘 · 2026-11-26</summary>
+<summary>撤销部分数据修改时少写一次磁盘</summary>
 
-更新前后的数据存放在同一页时，撤销更新只需把这页写一次。
+修改前后的数据存放在磁盘同一页时，撤销修改只需写回这页一次。
 
 这也适用于被视图拒绝的更新，以及用 `ROLLBACK TO SAVEPOINT` 撤销的更新。
 
-[测试报告](docs/test-report.md#same-page-update-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#same-page-update-undo-cost-20261126)
+2026-11-26 · [测试报告](docs/test-report.md#same-page-update-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#same-page-update-undo-cost-20261126)
 
 </details>
 
