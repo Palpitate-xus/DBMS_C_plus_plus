@@ -89,7 +89,7 @@ inline std::string primitiveNode(const Expr* expression, Oid targetType) {
 // runtime casts. All unrelated source bytes retain their original spelling.
 inline Bound bind(const std::string& definition, Oid targetType,
     const CatalogManager::MetadataSnapshot& catalog, const Session* session,
-    const std::function<bool(const FunctionCallExpr*)>& builtinNextval = {}) {
+    const std::function<bool(const FunctionCallExpr*)>& builtinNextval = {}, std::string_view database = {}) {
     constexpr size_t prefix = 7; // "SELECT "
     SQLParser parser;
     auto parsed = parser.parseForBinding("SELECT " + definition);
@@ -111,7 +111,8 @@ inline Bound bind(const std::string& definition, Oid targetType,
             throw DbError("XX001", "column default lost its source provenance");
         Constant constant; constant.type = type;
         if (input) {
-            constant.value = stored_regtype_detail::input(*input, pg_object_constant::array(type), catalog, session, pg_object_constant::name(type));
+            constant.value = stored_regtype_detail::input(*input, pg_object_constant::array(type), catalog,
+                session, pg_object_constant::name(type), database);
             // PostgreSQL's dependency walker sees scalar Const nodes, not
             // individual objects inside an array-typed Const datum.
             if (!pg_object_constant::array(type)) {

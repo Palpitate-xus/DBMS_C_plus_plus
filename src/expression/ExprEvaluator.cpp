@@ -5840,8 +5840,9 @@ ExprValue ExprEvaluator::castReferenceValue(const ExprValue& v,
         if(target=="regclass") {
             // SQL text and varchar conversions look up names, even names
             // spelled entirely with digits. Untyped input can carry an OID.
-            if(!oid && source!="text" && source!="varchar")oid=regclass_detail::literalOid(v.value);
-            auto reference=engine.catalogService().resolveRegclass(database,oid,v.value,session);
+            const bool textInput=source=="text" || source=="varchar";
+            if(!oid && !textInput)oid=regclass_detail::literalOid(v.value);
+            auto reference=engine.catalogService().resolveRegclass(database,oid,v.value,session,textInput);
             ExprValue result(target,std::move(reference.second),false);
             result.objectOid=reference.first;
             return result;
@@ -5855,7 +5856,7 @@ ExprValue ExprEvaluator::castReferenceValue(const ExprValue& v,
        (target=="oid" || target=="integer" || target=="smallint" || target=="bigint")) {
         if(v.isNull)return ExprValue(target,"",true);
         const Oid oid=v.objectOid?*v.objectOid:stored_regtype_detail::inputOid(
-            v.value,regtype_detail::metadata(engine,database),currentSession(),sourceType);
+            v.value,regtype_detail::metadata(engine,database),currentSession(),sourceType,database);
         if(target=="oid"){ExprValue result("oid",std::to_string(oid));result.objectOid=oid;return result;}
         if(target=="integer") {
             const int64_t number=oid>std::numeric_limits<int32_t>::max()?static_cast<int64_t>(oid)-(int64_t{1}<<32):oid;

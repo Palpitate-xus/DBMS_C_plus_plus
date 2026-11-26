@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 表名前带上数据库名
+
+PostgreSQL 将 `数据库名.模式名.表名` 中的数据库名与当前连接的数据库核对，再在指定模式中找表。显式文本转换和未定型字面量对缺失模式使用不同的错误码。SQLite 可以通过两段名称指定主库、临时库或附加数据库。DuckDB 支持分别指定目录和模式。 [PostgreSQL 18.6 名称查找源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L417-L504) · [PostgreSQL 18.6 转换源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/regproc.c#L817-L856) · [SQLite 对象名称](https://sqlite.org/lang_naming.html) · [DuckDB 1.4.2 目录查找源码](https://github.com/duckdb/duckdb/blob/v1.4.2/src/catalog/catalog.cpp#L395-L433)
+
+本项目的 `regclass` 输入现在可以带上当前数据库名。写其他库名返回 `0A000`。普通模式不存在时，文本或变长字符串转换返回 `3F000`，未定型字面量返回 `42P01`。新库预置的 `pg_temp_1` 让首个会话在创建临时表之前也能看到该模式，这时转换不存在的临时表名会返回 `42P01`，PostgreSQL 18.6 返回 `3F000`。 [用法](MANUAL.md#从文本列查找表的编号) · [测试](test-report.md#regclass-qualified-database-20261126)
+
 ## 2026-11-26 · 用查询参数指定要查看的表
 
 PostgreSQL 的索引扫描在执行时计算依赖运行时数据的查找值，重新扫描时会重算。SQLite 将等值条件的右侧求值写入用于查找的寄存器。DuckDB 在支持提前筛选的扫描中遇到参数时，可在执行时重新绑定筛选条件。 [PostgreSQL 18.6 索引扫描源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeIndexscan.c#L504-L610) · [SQLite 3.51.0 等值条件源码](https://github.com/sqlite/sqlite/blob/version-3.51.0/src/wherecode.c#L775-L805) · [DuckDB 1.4.2 条件筛选源码](https://github.com/duckdb/duckdb/blob/v1.4.2/src/optimizer/pushdown/pushdown_get.cpp#L8-L30)
@@ -12,7 +18,7 @@ PostgreSQL 的索引扫描在执行时计算依赖运行时数据的查找值，
 
 PostgreSQL 18.6 将 `text` 和 `varchar` 转成 `regclass` 时按关系名查找。显示结果时按对象编号读取目录缓存，再决定是否带上模式名。SQLite 的 `PRAGMA table_xinfo` 先定位指定的表，再遍历它的列。DuckDB 按名称查到候选目录项后，选择当前事务可见的版本。 [PostgreSQL 18.6 转换和输出源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/regproc.c) · [PostgreSQL 18.6 转换声明](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_cast.dat#L247-L250) · [SQLite 3.51.0 表信息源码](https://github.com/sqlite/sqlite/blob/version-3.51.0/src/pragma.c#L1158-L1205) · [DuckDB 1.4.2 目录查找源码](https://github.com/duckdb/duckdb/blob/v1.4.2/src/catalog/catalog_set.cpp#L538-L550)
 
-本项目用当前事务可见的目录按名称和编号查找对应表，沿用原有的目录文件校验。文本 `007` 可以查到名为 `"007"` 的表，直接写下的 `'007'::regclass` 则表示编号 7。目录查询仍会逐行求值运行时文本。文本指定的模式不存在时，本项目返回 `42P01`，PostgreSQL 返回 `3F000`。本项目支持 `模式名.表名`，PostgreSQL 还能在名称里带上当前数据库名。 [测试](test-report.md#regclass-runtime-20261126) · [性能对照](performance-report-2026-10-30.md#regclass-runtime-cost-20261126)
+该版本用当前事务可见的目录按名称和编号查找对应表，沿用原有的目录文件校验。文本 `007` 可以查到名为 `"007"` 的表，直接写下的 `'007'::regclass` 则表示编号 7。该轮测试中，目录查询还会逐行求值运行时文本。 [测试](test-report.md#regclass-runtime-20261126) · [性能对照](performance-report-2026-10-30.md#regclass-runtime-cost-20261126)
 
 ## 2026-11-26 · 按表名查列时怎样确定对象
 

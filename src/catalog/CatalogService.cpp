@@ -824,26 +824,32 @@ CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::str
 }
 
 std::pair<Oid, std::string> CatalogService::resolveRegclass(const std::string& database,
-    std::optional<Oid> oid, const std::string& input, const Session* session) const {
+    std::optional<Oid> oid, const std::string& input, const Session* session, bool textInput) const {
     const auto ownership = database.empty() ? StorageEngine::CatalogReadOwnership{}
                                             : engine_.catalogReadOwnership(database);
     const auto catalog = database.empty() ? ReadCatalog{} : readCatalog(database, ownership.mayReadCurrentFiles);
     CatalogManager::QualifiedName name;
+    std::string requiredSchema;
     auto namespacePath = freezeDeclaredTypeNamespace(session);
     for (auto& schema : namespacePath.schemas)
         if (schema == "pg_temp") schema = namespacePath.temporarySchema;
     if (!oid) {
-        name = regclass_detail::parseName(input);
+        name = regclass_detail::parseName(input, database);
+        if (textInput) requiredSchema = name.schema;
         if (name.schema == "pg_temp") {
             // A standalone native caller has no temporary namespace.
-            if (namespacePath.temporarySchema.empty())
+            if (namespacePath.temporarySchema.empty()) {
+                if (textInput) throw DbError("3F000", "schema \"pg_temp\" does not exist");
                 throw DbError("42P01", "relation \"" + input + "\" does not exist");
+            }
             name.schema = namespacePath.temporarySchema;
         }
     }
-    const auto relation = catalog.manager ? catalog.manager->relationReference(oid, name, namespacePath.schemas)
+    if (!catalog.manager && catalog.path.empty() && !requiredSchema.empty())
+        throw DbError("3F000", "schema \"" + requiredSchema + "\" does not exist");
+    const auto relation = catalog.manager ? catalog.manager->relationReference(oid, name, namespacePath.schemas, requiredSchema)
         : catalog.path.empty() ? std::nullopt
-                              : CatalogManager::readRelationReference(catalog.path, oid, name, namespacePath.schemas);
+        : CatalogManager::readRelationReference(catalog.path, oid, name, namespacePath.schemas, requiredSchema);
     if (relation && relation->oid) {
         auto display = SQLParser::quoteIdentifier(relation->name);
         if (relation->schema) display = SQLParser::quoteIdentifier(*relation->schema) + "." + display;
@@ -1885,7 +1891,7 @@ std::vector<ExprValue> readPartitionAncestors(const StorageEngine& engine,
     }
     const auto metadata = catalog.manager ? catalog.manager->metadataSnapshot(false)
         : CatalogManager::readMetadataSnapshot(catalog.path, false);
-    const auto oid = numeric ? *numeric : regclass_detail::inputOid(input.value, metadata, session);
+    const auto oid = numeric ? *numeric : regclass_detail::inputOid(input.value, metadata, session, database);
     const auto relation = std::find_if(metadata.relations.begin(), metadata.relations.end(),
         [&](const auto& row) { return row.oid == oid; });
     if (relation == metadata.relations.end() ||

@@ -8407,7 +8407,7 @@ static std::string canonicalEqualityValue(const TableSchema& table,
         if (type == "oid" && !table.cols[i].isArray) return std::to_string(parseOidInput(value));
         if(stored_regtype_detail::scalarType(type) && !table.cols[i].isArray && engine) {
             const auto catalog=regtype_detail::metadata(*engine,database);
-            return stored_regtype_detail::input(value,false,catalog,currentSession(),type);
+            return stored_regtype_detail::input(value,false,catalog,currentSession(),type,database);
         }
         const bool integer = type == "tinyint" || type == "smallint" ||
             type == "int" || type == "integer" || type == "bigint" ||
@@ -8511,7 +8511,8 @@ bool IndexScanOp::open() {
                 else if (tbl_.cols[i].dataType == "oid") referenceEqualityOid_ = parseOidInput(value_);
                 else {
                     const auto catalog=regtype_detail::metadata(*engine_,dbname_);
-                    referenceEqualityOid_=stored_regtype_detail::inputOid(value_,catalog,currentSession(),tbl_.cols[i].dataType);
+                    referenceEqualityOid_=stored_regtype_detail::inputOid(value_,catalog,currentSession(),
+                        tbl_.cols[i].dataType,dbname_);
                 }
             } catch(...) {
                 // Only this newly introduced conversion owns this cleanup.

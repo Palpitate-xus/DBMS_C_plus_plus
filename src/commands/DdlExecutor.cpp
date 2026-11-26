@@ -1692,7 +1692,7 @@ static column_default::Bound bindColumnDefault(CatalogManager& catalog,
         [&](const FunctionCallExpr* call) {
             if (!resolver) { resolver = std::make_unique<ExprEvaluator>(); resolver->setCurrentDB(database); }
             return resolver->scalarFunctionIdentity(call, &engine).rfind("builtin", 0) == 0;
-        });
+        }, database);
 }
 
 void validateArrayDomainDefaultLiteral(const std::string& database,
@@ -11368,7 +11368,7 @@ struct ViewSequenceArgument {
 // Explicit text casts are evaluated at runtime and have no object dependency.
 static std::optional<ViewSequenceArgument> inspectViewSequenceArgument(
     const FunctionCallExpr& call, StorageEngine& engine, ExprEvaluator& resolver,
-    const CatalogManager::MetadataSnapshot& catalog, bool bindByName,
+    const CatalogManager::MetadataSnapshot& catalog, const std::string& database, bool bindByName,
     const std::set<Oid>* moving = nullptr) {
     CatalogManager::QualifiedName routine;
     const auto spelling = call.schema.empty() ? call.funcName : call.schema + "." + call.funcName;
@@ -11406,7 +11406,7 @@ static std::optional<ViewSequenceArgument> inspectViewSequenceArgument(
             [&](const auto& row) { return row.oid == oid; });
         if (found != catalog.relations.end()) relation = &*found;
     } else {
-        const auto name = regclass_detail::parseName(*input);
+        const auto name = regclass_detail::parseName(*input, database);
         if (moving && name.schema.empty() &&
             std::any_of(catalog.relations.begin(), catalog.relations.end(), [&](const auto& row) {
                 return moving->count(row.oid) && row.relname == name.name;
@@ -11454,7 +11454,7 @@ static std::vector<LegacySequenceDefault> planLegacySequenceDefaults(
             (void)boundViewRelationDependencies(catalog, database, prepared, {}, engine,
                 [&](const FunctionCallExpr& call) {
                     const auto moved = inspectViewSequenceArgument(
-                        call, engine, resolver, *metadata, true, &sequences);
+                        call, engine, resolver, *metadata, database, true, &sequences);
                     if (moved && moved->byName)
                         edits.emplace(moved->span, storedSequenceArgument(moved->oid));
                 });
@@ -11487,7 +11487,7 @@ static ViewRelationDependencies inspectViewBindings(
         }, engine, [&](const FunctionCallExpr& call) {
             if (sequenceMetadata) {
                 const auto reference = inspectViewSequenceArgument(call, engine, resolver,
-                    *sequenceMetadata, false);
+                    *sequenceMetadata, database, false);
                 if (reference) sequenceDependencies.insert(reference->oid);
             }
             if (onCall) onCall(call);
@@ -11633,7 +11633,7 @@ static std::vector<ViewRenamePlan> planViewSourceRenames(
             engine, [&](const FunctionCallExpr& call) {
                 if (sequenceView == sequenceViews.end()) return;
                 const auto moved = inspectViewSequenceArgument(
-                    call, engine, sequenceResolver, *sequenceMetadata, true, &sequences);
+                    call, engine, sequenceResolver, *sequenceMetadata, database, true, &sequences);
                 if (moved && moved->byName) {
                     edit(moved->span.first, moved->span.second, storedSequenceArgument(moved->oid));
                     plan.newSequenceDependencies.insert(moved->oid);
@@ -12352,7 +12352,7 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
             {}, g_engine, [&](const FunctionCallExpr& call) {
                 if (!sequenceMetadata) return;
                 const auto reference = inspectViewSequenceArgument(
-                    call, g_engine, resolver, *sequenceMetadata, true);
+                    call, g_engine, resolver, *sequenceMetadata, s.currentDB, true);
                 if (!reference) return;
                 sequenceDependencies.insert(reference->oid);
                 if (reference->byName)

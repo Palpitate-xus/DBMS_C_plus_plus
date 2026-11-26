@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-26 accept database-qualified relation names in regclass input",
+      "gap_ids": ["CAT-03", "QRY-01", "CLIENT-01"],
+      "status": "partial",
+      "evidence": ["src/expression/regclass_input.h", "src/catalog/CatalogService.cpp", "src/catalog/CatalogAttributeScan.h", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/format_type_protocol_e2e_test.py", "tests/regclass_value_test.cpp"],
+      "verification": [
+        "Match the current database name, preserve quoted components and distinguish malformed and unsupported names.",
+        "Distinguish missing-schema errors for text or varchar casts and for the regclass input function.",
+        "Reuse the validated catalog generation for the scan key; verify parameters, stored references, defaults and recovery."
+      ]
+    },
+    {
       "issue": "2026-11-26 narrow attribute scans using runtime table names",
       "gap_ids": ["CAT-03", "QRY-01", "CLIENT-01"],
       "status": "partial",

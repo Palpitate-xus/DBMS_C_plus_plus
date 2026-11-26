@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 支持带当前数据库名的表引用
+
+`regclass` 识别 `数据库名.模式名.表名`，保存的是实际对象编号。显式文本转换在模式不存在时使用 `3F000`，未定型字面量使用 `42P01`。用运行时文本筛选列目录时，查找类型和表编号使用同一份目录数据。`CAT-03`、`QRY-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#regclass-qualified-database-20261126) · [性能对照](performance-report-2026-10-30.md#regclass-qualified-database-cost-20261126)
+
 ## 2026-11-26 · 用查询参数缩小列目录的读取范围
 
 直接查询 `pg_attribute` 时，先用实际内置 `regclass` 转换首个等值条件中的文本参数或文本值，再为匹配的列生成查询行。查找遇到空值、同名的其他类型或不同的表编号时，继续由原有条件筛选。子查询、联接和混合目录筛选仍需单独验证和优化。`CAT-03`、`QRY-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#catalog-runtime-key-20261126) · [性能对照](performance-report-2026-10-30.md#catalog-runtime-key-cost-20261126)

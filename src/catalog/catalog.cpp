@@ -687,8 +687,11 @@ std::optional<PgClassRow> CatalogManager::resolveRelationSnapshot(
 }
 
 std::optional<CatalogManager::RelationReference> CatalogManager::relationReference(
-    std::optional<Oid> oid, const QualifiedName& name, const std::vector<std::string>& searchPath) const {
+    std::optional<Oid> oid, const QualifiedName& name, const std::vector<std::string>& searchPath,
+    const std::string& requiredSchema) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!oid && !requiredSchema.empty() && nsByName_.find(name.schema) == nsByName_.end())
+        throw DbError("3F000", "schema \"" + requiredSchema + "\" does not exist");
     // Native catalogs and older images can contain repeated names or OIDs.
     // Keep the original first-match order in those images.
     const bool uniqueNames = nsByName_.size() == namespaces_.size() && classByName_.size() == classes_.size();
@@ -734,9 +737,9 @@ std::optional<CatalogManager::RelationReference> CatalogManager::relationReferen
 
 std::optional<CatalogManager::RelationReference> CatalogManager::readRelationReference(
     const std::string& path, std::optional<Oid> oid, const QualifiedName& name,
-    const std::vector<std::string>& searchPath) {
+    const std::vector<std::string>& searchPath, const std::string& requiredSchema) {
     CatalogManager catalog(path, ReadOnlyTag{});
-    return catalog.relationReference(oid, name, searchPath);
+    return catalog.relationReference(oid, name, searchPath, requiredSchema);
 }
 
 std::optional<bool> CatalogManager::relationIsVisible(

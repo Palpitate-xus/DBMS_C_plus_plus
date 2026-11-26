@@ -1,8 +1,9 @@
 #pragma once
 #include "expression/regtype_input.h"
+#include <string_view>
 
 namespace dbms::regclass_detail {
-inline CatalogManager::QualifiedName parseName(const std::string& input) {
+inline CatalogManager::QualifiedName parseName(const std::string& input, std::string_view database) {
     std::vector<std::string> parts;
     size_t at=0;
     const auto whitespace=[&] {while(at<input.size() && std::isspace(static_cast<unsigned char>(input[at])))++at;};
@@ -27,10 +28,13 @@ inline CatalogManager::QualifiedName parseName(const std::string& input) {
         }
         whitespace();parts.push_back(std::move(part));
         if(at==input.size())break;
-        if(input[at++]!='.' || parts.size()==2)throw DbError("42602","invalid name syntax");
+        if(input[at++]!='.')throw DbError("42602","invalid name syntax");
     }
+    if(parts.size()>3)throw DbError("42601","improper qualified name (too many dotted names): "+input);
+    if(parts.size()==3 && std::string_view(parts.front())!=database)
+        throw DbError("0A000","cross-database references are not implemented: \""+input+"\"");
     CatalogManager::QualifiedName result;result.name=parts.back();
-    if(parts.size()==2)result.schema=parts.front();
+    if(parts.size()>1)result.schema=parts[parts.size()-2];
     return result;
 }
 // A relation reference is an actual pg_class identity. Resolution uses one
@@ -58,10 +62,24 @@ inline std::optional<Oid> literalOid(const std::string& input) {
     return std::nullopt;
 }
 inline Oid inputOid(const std::string& input,const CatalogManager::MetadataSnapshot& catalog,
-    const Session* session) {
+    const Session* session,std::string_view database={}) {
     if(const auto numeric=literalOid(input))return *numeric;
-    const auto name=parseName(input);
+    if(database.empty() && session)database=session->currentDB;
+    const auto name=parseName(input,database);
     if(const auto* relation=lookup(name,catalog,session))return relation->oid;
+    throw DbError("42P01","relation \""+input+"\" does not exist");
+}
+inline Oid textInputOid(const std::string& input,const CatalogManager::MetadataSnapshot& catalog,
+    const Session* session,std::string_view database) {
+    const auto name=parseName(input,database);
+    if(const auto* relation=lookup(name,catalog,session))return relation->oid;
+    if(!name.schema.empty()) {
+        const auto schema=name.schema=="pg_temp"
+            ? (session?sessionTempSchemaName(*session):std::string{}) : name.schema;
+        if(std::none_of(catalog.namespaces.begin(),catalog.namespaces.end(),
+                       [&](const auto& row){return row.nspname==schema;}))
+            throw DbError("3F000","schema \""+name.schema+"\" does not exist");
+    }
     throw DbError("42P01","relation \""+input+"\" does not exist");
 }
 inline std::string output(Oid oid,const CatalogManager::MetadataSnapshot& catalog,

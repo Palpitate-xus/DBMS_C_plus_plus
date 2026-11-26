@@ -2861,7 +2861,7 @@ SELECT table_name, table_name::pg_catalog.regclass::oid AS table_number
 FROM tracked_tables;
 ```
 
-如果有同名表，可以在数据里写完整的名称，例如 `public.orders`。文本 `007` 会查找名为 `"007"` 的表。想直接使用表编号 7 时，可写 `7::pg_catalog.regclass`。 [验证记录](test-report.md#regclass-runtime-20261126)
+如果有同名表，可以在数据里写 `public.orders`。连接的数据库叫 `shop` 时，也可以写 `shop.public.orders`。文本 `007` 会查找名为 `"007"` 的表。想直接使用表编号 7 时，可写 `7::pg_catalog.regclass`。 [名称和错误码测试](test-report.md#regclass-qualified-database-20261126) · [文本列测试](test-report.md#regclass-runtime-20261126)
 
 ### 查询列的默认值
 

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查表编号时可以带上当前数据库名 · 2026-11-26</summary>
+
+连接到 `shop` 数据库后，可以用 `shop.public.orders` 查订单表的编号。
+
+[使用说明](docs/MANUAL.md#从文本列查找表的编号) · [测试报告](docs/test-report.md#regclass-qualified-database-20261126) · [性能报告](docs/performance-report-2026-10-30.md#regclass-qualified-database-cost-20261126)
+
+</details>
+
+<details>
 <summary>应用传入表名时，查看列信息更快 · 2026-11-26</summary>
 
 应用把表名作为参数传给查询时，可以更快拿到列名和类型。在另外建了 128 张表的测试库里，列出目标表的四列用时从约 320 毫秒降到约 17 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>直接在 SQL 里写表名，查看列信息更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 直接在 SQL 里写表名，查看列信息更快
 
 查询只需要一张表的列名和类型时，数据库可以跳过其他表。在另外建了 32 张表的测试库里，列出目标表的四列用时从约 95 毫秒降到约 6 毫秒。
 
 [测试报告](docs/test-report.md#regclass-catalog-filter-20261126) · [性能报告](docs/performance-report-2026-10-30.md#regclass-catalog-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 按表编号查看列信息更快
 

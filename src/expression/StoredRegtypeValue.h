@@ -17,8 +17,8 @@ inline bool scalarType(const std::string& type) {
     return type=="regtype" || type=="regclass";
 }
 inline Oid inputOid(const std::string& input,const CatalogManager::MetadataSnapshot& catalog,
-    const Session* session,const std::string& type) {
-    return type=="regclass"?regclass_detail::inputOid(input,catalog,session):regtype_detail::inputOid(input,catalog,session);
+    const Session* session,const std::string& type,std::string_view database={}) {
+    return type=="regclass"?regclass_detail::inputOid(input,catalog,session,database):regtype_detail::inputOid(input,catalog,session);
 }
 inline std::string outputOid(Oid oid,const CatalogManager::MetadataSnapshot& catalog,
     const Session* session,const std::string& type) {
@@ -59,9 +59,9 @@ inline std::string mapArray(const std::string& input,
 }
 inline std::string input(const std::string& value,bool array,
                          const CatalogManager::MetadataSnapshot& catalog,
-                         const Session* session,const std::string& type="regtype") {
+                         const Session* session,const std::string& type="regtype",std::string_view database={}) {
     const auto convert=[&](const std::string& token) {
-        return std::to_string(inputOid(token,catalog,session,type));
+        return std::to_string(inputOid(token,catalog,session,type,database));
     };
     return array?mapArray(value,convert):convert(value);
 }

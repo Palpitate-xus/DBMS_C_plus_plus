@@ -45,10 +45,27 @@ int main() {
         rows("SELECT 'reference_target'::regclass::oid",{{std::to_string(target->oid)}});
         rows("SELECT 'public.reference_target'::regclass::text",{{"reference_target"}});
         rows("SELECT ' public.\"Mixed Name\" '::regclass::oid",{{std::to_string(quoted->oid)}});
+        const auto qualifiedTarget = database + ".public.reference_target";
+        rows("SELECT '" + qualifiedTarget + "'::text::regclass::oid", {{std::to_string(target->oid)}});
+        create("CREATE TABLE qualified_values(id integer, ref regclass, refs regclass[])");
+        {
+            struct RestoreSession {
+                Session* saved = currentSession();
+                ~RestoreSession() { setCurrentSession(saved); }
+            } restore;
+            setCurrentSession(nullptr);
+            const std::map<std::string, std::string> values{
+                {"id", "1"}, {"ref", qualifiedTarget}, {"refs", "{" + qualifiedTarget + ",NULL}"}
+            };
+            need(g_engine.insert(database, "qualified_values", values) == DBStatus::OK,
+                 "raw scalar and array references use the storage call's database without a session");
+        }
+        rows("SELECT ref::oid,refs[1]::oid FROM qualified_values",
+             {{std::to_string(target->oid), std::to_string(target->oid)}});
         rows("SELECT 0::regclass::oid,(-1::integer)::regclass::oid,4294967295::regclass::oid",{{"0","4294967295","4294967295"}});
         const char* columnQuery = "SELECT attname FROM pg_catalog.pg_attribute "
             "WHERE attrelid=$1::pg_catalog.text::pg_catalog.regclass AND attnum>0";
-        const QueryBindingDatum name{"catalog:name", "name", "text", {}, true, "reference_target", 1};
+        const QueryBindingDatum name{"catalog:name", "name", "text", {}, true, qualifiedTarget, 1};
         auto catalogQuery = std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(database, columnQuery, {name}));
         auto catalogPlan = QueryPlanner::buildPreparedQueryPlan(&g_engine, database, catalogQuery, catalogQuery->ast.get());
         auto catalogResult = QueryPlanner::executePlanChecked(std::move(catalogPlan));
@@ -102,7 +119,7 @@ int main() {
             coldCatalog.evict(database);
             need(!coldCatalog.has(database), "reader begins without a cached catalog");
             const auto reference = coldCatalog.resolveRegclass(database, std::nullopt,
-                                                               "public.moved_reference", &session);
+                database + ".public.moved_reference", nullptr, true);
             need(reference.first == target->oid && reference.second == "moved_reference",
                  "read-only lookup resolves a renamed relation from the persisted catalog");
             need(!coldCatalog.has(database), "read-only lookup leaves the catalog uncached");

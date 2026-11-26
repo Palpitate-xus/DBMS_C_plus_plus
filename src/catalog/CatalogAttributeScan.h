@@ -5,6 +5,7 @@
 #include "catalog/declared_type.h"
 #include "commands/TableManage.h"
 #include "expression/ExprEvaluator.h"
+#include "expression/regclass_input.h"
 
 namespace dbms {
 
@@ -156,11 +157,10 @@ private:
             literal.typeName.clear();
             text = ExprEvaluator{}.eval(&literal, RowContext{});
         }
-        // The checked, unconstrained text casts keep the leaf's bytes.
-        // Invoke the known codec so a new name resolution cannot run a
-        // domain or choose a different conversion during source selection.
-        const auto result = ExprEvaluator::castReferenceValue(text, "text", "regclass", engine, database);
-        return result.isNull ? std::nullopt : result.objectOid;
+        // Just the OID is needed. Use the same generation that verified the
+        // cast declarations and leave display formatting to the predicate.
+        if (text.isNull) return {};
+        return regclass_detail::textInputOid(text.value, metadata, session, database);
     }
 
     std::optional<Oid> literalOid_;

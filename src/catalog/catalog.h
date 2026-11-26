@@ -129,9 +129,11 @@ public:
     // Resolve input and determine how to display the result in one generation.
     // An engaged OID takes precedence over the parsed name.
     std::optional<RelationReference> relationReference(std::optional<Oid> oid,
-        const QualifiedName& name, const std::vector<std::string>& searchPath) const;
+        const QualifiedName& name, const std::vector<std::string>& searchPath,
+        const std::string& requiredSchema = {}) const;
     static std::optional<RelationReference> readRelationReference(const std::string& path,
-        std::optional<Oid> oid, const QualifiedName& name, const std::vector<std::string>& searchPath);
+        std::optional<Oid> oid, const QualifiedName& name, const std::vector<std::string>& searchPath,
+        const std::string& requiredSchema = {});
     std::optional<PgAttributeRow> resolveAttributeSnapshot(
         const std::string& tableName, const std::string& colName,
         const std::vector<std::string>& searchPath) const;

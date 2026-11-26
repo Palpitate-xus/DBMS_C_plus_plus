@@ -30398,7 +30398,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
             if(!valueEngine || valueDb.empty())
                 throw DbError("0A000","regtype name predicate requires its actual database context");
             const auto catalog=regtype_detail::metadata(*valueEngine,valueDb);
-            right=stored_regtype_detail::input(right,false,catalog,currentSession(),col.dataType);
+            right=stored_regtype_detail::input(right,false,catalog,currentSession(),col.dataType,valueDb);
         }
         return compareValues(col,val,false,right,false,cond.op)==PredicateTruth::True;
     }
@@ -32063,7 +32063,7 @@ DBStatus StorageEngine::insertInternal(
         if (hasValue && !isNullMarker && stored_regtype_detail::scalarType(col.dataType)) {
             const auto catalog = regtype_detail::metadata(*this, dbname);
             actualValues[col.dataName] = stored_regtype_detail::input(
-                val, col.isArray, catalog, currentSession(), col.dataType);
+                val, col.isArray, catalog, currentSession(), col.dataType, dbname);
             // Reference input is complete; arithmetic/array casts must not
             // interpret the canonical OID as a different SQL input type.
             return DBStatus::OK;
@@ -34689,7 +34689,7 @@ static void prepareFilterConditions(
             const auto catalog=regtype_detail::metadata(engine,dbname);
             condition.value=condition.referenceInputOid?std::to_string(*condition.referenceInputOid):
                 stored_regtype_detail::input(
-                    decodeSqlLiteral(condition.value),false,catalog,currentSession(),declared->dataType);
+                    decodeSqlLiteral(condition.value),false,catalog,currentSession(),declared->dataType,dbname);
             condition.decodedLiteralRhs=true;
         }
     }
@@ -37499,7 +37499,7 @@ DBStatus StorageEngine::updateInternal(
                     if (stored_regtype_detail::scalarType(col.dataType) && !isNullMarker) {
                         const auto catalog = regtype_detail::metadata(*this, dbname);
                         storeVal = stored_regtype_detail::input(
-                            kv.second, col.isArray, catalog, currentSession(), col.dataType);
+                            kv.second, col.isArray, catalog, currentSession(), col.dataType, dbname);
                     }
                     if (stored_regtype_detail::scalarType(col.dataType)) {
                         // Already canonicalized once by the actual input owner.

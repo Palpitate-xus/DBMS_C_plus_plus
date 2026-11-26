@@ -6,6 +6,8 @@
 
 普通表中的 `text` 或 `varchar` 可通过 `::regclass` 按名称查找关系。结果可以显示名称，也可以通过 `::oid` 返回实际对象编号。若输入是 `'007'::text`，会按表名查找 `"007"`。直接写 `'007'::regclass` 表示对象编号 7。查询在执行时按当前搜索路径处理同名表，支持用 `pg_temp` 指定会话自己的临时表。 [用法](MANUAL.md#从文本列查找表的编号) · [测试报告](test-report.md#regclass-runtime-20261126)
 
+表名可以带上当前数据库，例如 `shop.public.orders`。指定其他数据库返回 `0A000`。模式不存在时，显式文本转换返回 `3F000`，直接输入的 `regclass` 字面量返回 `42P01`。 [名称解析测试](test-report.md#regclass-qualified-database-20261126)
+
 ## 2026-11-24 · 系统目录函数的返回类型
 
 查询绑定到内置 `format_type`、`pg_get_indexdef`、`pg_get_constraintdef` 或 `pg_get_expr` 时，执行沿用该调用确定的结果类型。明确使用 `pg_catalog` 的调用保留内置函数的文本结果。未指定模式的调用按搜索路径及参数类型选择函数。 [测试报告](test-report.md#bound-catalog-results-20261124)

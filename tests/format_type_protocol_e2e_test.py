@@ -136,6 +136,57 @@ def check_runtime_catalog_key(wire, is_postgres):
     wire.command("SET search_path=public", "SET")
 
 
+def check_qualified_regclass(wire, table_oid):
+    frames = wire.send_statements("SELECT current_database()")
+    database = wire.client.data_row_values(frames)[0][0].decode()
+    db_name = '"' + database.replace('"', '""') + '"'
+    target = f"{db_name}.format_a.format_probe"
+    for suffix in ("::regclass", "::text::regclass", "::varchar::regclass"):
+        wire.query(f"SELECT '{db_name} . format_a . format_probe'{suffix}::oid AS id",
+                   rows=[(str(table_oid),)], fields=[("id", 26)])
+        for invalid, state in (
+            ("other_database.format_a.format_probe", "0A000"),
+            (f"{db_name}.format_a.missing", "42P01"),
+            (f"{db_name}.no_such_schema.missing", "42P01" if suffix == "::regclass" else "3F000"),
+            ("a.b.c.d", "42601"),
+            ("a.b.c.", "42602"),
+        ):
+            wire.query(f"SELECT '{invalid}'{suffix}", state=state, tag=None)
+
+    sql = "SELECT $1::pg_catalog.text::pg_catalog.regclass::oid AS id"
+    frames = wire.exchange(wire.parse(sql, oids=(25,)) + wire.bind(arguments=(target.encode(),)) +
+                           wire.describe_portal() + wire.execute() + wire.packet(b"S"))
+    wire.check(sql, frames, rows=[(str(table_oid),)], fields=[("id", 26)])
+    scan = ("SELECT attname FROM pg_catalog.pg_attribute "
+            "WHERE attrelid=$1::text::regclass AND attnum>0 ORDER BY attnum")
+    frames = wire.exchange(wire.parse(scan, oids=(25,)) + wire.bind(arguments=(target.encode(),)) +
+                           wire.describe_portal() + wire.execute() + wire.packet(b"S"))
+    wire.check(scan, frames, rows=[(column,) for column, _ in DECLARATIONS],
+               fields=[("attname", 19)], tag=f"SELECT {len(DECLARATIONS)}")
+
+    wire.command("CREATE TEMP TABLE qualified_temp_probe(id integer)", "CREATE TABLE")
+    temp_oid = wire.client.data_row_values(
+        wire.send_statements("SELECT 'pg_temp.qualified_temp_probe'::regclass::oid"))[0][0].decode()
+    wire.query(f"SELECT '{db_name}.pg_temp.qualified_temp_probe'::text::regclass::oid AS id",
+               rows=[(temp_oid,)], fields=[("id", 26)])
+    wire.query(f"SELECT '{db_name}.pg_temp.no_table'::text::regclass", state="42P01", tag=None)
+    wire.command("DROP TABLE pg_temp.qualified_temp_probe", "DROP TABLE")
+
+    wire.command(f"CREATE TABLE format_a.qualified_reference(id int, ref regclass DEFAULT '{target}')",
+                 "CREATE TABLE")
+    wire.command(f"INSERT INTO format_a.qualified_reference VALUES (1,DEFAULT),(2,'{target}')", "INSERT 0 2")
+    query = "SELECT ref::text AS ref, ref::oid AS number FROM format_a.qualified_reference ORDER BY id"
+    fields = [("ref", 25), ("number", 26)]
+    original = ("format_a.format_probe", str(table_oid))
+    wire.query(query, rows=[original] * 2, fields=fields, tag="SELECT 2")
+    wire.command("BEGIN", "BEGIN", ready=b"T")
+    wire.command("ALTER TABLE format_a.format_probe RENAME TO qualified_moved", "ALTER TABLE", ready=b"T")
+    wire.query(query, rows=[("format_a.qualified_moved", str(table_oid))] * 2,
+               fields=fields, tag="SELECT 2", ready=b"T")
+    wire.command("ROLLBACK", "ROLLBACK")
+    wire.query(query, rows=[original] * 2, fields=fields, tag="SELECT 2")
+
+
 def check_runtime_regclass(wire):
     wire.command('CREATE TABLE format_a."Case.Table"(id integer)', "CREATE TABLE")
     wire.command('CREATE TABLE format_a."007"(id integer)', "CREATE TABLE")
@@ -304,6 +355,7 @@ def main():
                 assert plan["actualRows"] == len(DECLARATIONS) and sources == [len(DECLARATIONS) + 6], plan
         check_prepared_regclass(wire, review.server is None)
         check_runtime_catalog_key(wire, review.server is None)
+        check_qualified_regclass(wire, table_oid)
 
         display("'format_a.status'::regtype", "format_a.status")
         display("'format_a.status[]'::regtype", "format_a.status[]")
