@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 较大的整数主键范围可按页使用索引
+
+已有整数主键范围可分批收集完整候选集。实际页覆盖超过表的一半或工作内存不足时，使用原有表扫描。完整范围、索引边界与原表行逐步核对，仍受现有事务可见性策略约束。`QRY-12`、`OPT-05` 和 `IDX-03` 保持部分实现。 [功能测试](test-report.md#view-wide-key-ranges-20261126) · [性能报告](performance-report-2026-10-30.md#view-wide-key-range-cost-20261126)
+
 ## 2026-11-26 · 通过普通视图使用底表索引筛选多个编号
 
 多层普通视图支持把受支持的整数主键范围传给底表索引，包括交叉筛选、`BETWEEN`、`NOT BETWEEN` 和多段 `OR`。小范围可以一次取到完整候选集。宽范围、旧快照和可串行化事务仍走原有扫描。视图全范围优化、连接及分区裁剪的统一规划仍有差距。`CAT-16`、`QRY-12`、`OPT-03` 和 `OPT-16` 保持部分实现。 [功能测试](test-report.md#view-primary-key-ranges-20261126) · [性能报告](performance-report-2026-10-30.md#view-primary-key-range-cost-20261126)

@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 admit wider integer primary-key ranges by page footprint and work memory",
+      "gap_ids": ["QRY-12", "OPT-05", "IDX-03"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/indexed_view_reads_protocol_e2e_test.py", "tests/ordinary_scalar_order_protocol_e2e_test.py", "tests/bptree_topology_corruption_test.cpp"],
+      "verification": [
+        "Verify ranges that cross index batches, disjoint ranges, identical results on heap fallback, and unordered LIMIT row order.",
+        "Force fallback independently with wide page coverage, candidate memory, and decoded text memory. Verify snapshots, crash recovery, and read plans on the recovered index.",
+        "Compare grouped and scattered heap layouts, point and narrow range controls, and two previous-version runs against PostgreSQL 18.6."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 combine integer primary-key ranges across ordinary views",
       "gap_ids": ["CAT-16", "QRY-12", "OPT-03", "OPT-16"],
       "status": "partial",

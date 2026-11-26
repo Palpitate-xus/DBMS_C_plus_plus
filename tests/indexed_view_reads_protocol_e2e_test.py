@@ -175,7 +175,7 @@ def exercise_ranges(wire, peer, schema, reference):
     # Early rows are deliberately out of key order. A complete index range
     # must preserve the heap order used when the unordered LIMIT falls back.
     first = [7, 4, 5, 9, 8, 3, 6, 2, 1]
-    other = list(range(10, 2049))
+    other = list(range(10, 3073))
     ids = first + other
     wire.command("BEGIN", "BEGIN", b"T")
     for start in range(0, len(ids), 128):
@@ -215,7 +215,10 @@ def exercise_ranges(wire, peer, schema, reference):
         ("number BETWEEN 3 AND 8 AND number <> 4", [3, 5, 7], 5, "2"),
         ("(number BETWEEN 3 AND 7 AND qty > 0) OR (number BETWEEN 521 AND 524 AND qty >= 0)",
          [3, 5, 7, 521, 523], 9, "2"),
-        ("number BETWEEN 200 AND 456", list(range(201, 457, 2)), None, None),
+        ("number BETWEEN 200 AND 456", list(range(201, 457, 2)), 257, None),
+        ("number BETWEEN 3 AND 260 OR number BETWEEN 1301 AND 1566",
+         [*range(3, 261, 2), *range(1301, 1567, 2)], 524, "2"),
+        ("number BETWEEN 3 AND 3072", list(range(3, 3073, 2)), None, None),
     )
     for condition, expected, fetched, intervals in cases:
         verify_range_plan(check(condition, expected), fetched, intervals)
@@ -225,12 +228,35 @@ def exercise_ranges(wire, peer, schema, reference):
     check("number < 3 OR qty = 11", [11])
     page = check("number BETWEEN 2 AND 7", [5, 3], "ORDER BY number DESC LIMIT 2 OFFSET 1")
     verify_range_plan(page, 5)
+    wide_condition = "number BETWEEN 3 AND 1026"
+    wide_rows = list(range(3, 1027, 2))
+    wide = check(wide_condition, wide_rows)
+    verify_range_plan(wide, 1024)
+    wire.command("SET work_mem='64kB'", "SET")
+    check(wide_condition, wide_rows)
+    verify_range_plan(wide, None)
+    wire.command("RESET work_mem", "RESET")
     if not reference:
         unordered = check("number BETWEEN 2 AND 7", [7, 5], "LIMIT 2")
         # This expression keeps the original full scan and proves fallback
         # and index access agree on the incumbent order in this fixture.
         check("number + 0 BETWEEN 2 AND 7", [7, 5], "LIMIT 2")
         verify_range_plan(unordered, 5)
+        across_chunks = check(wide_condition, [7, 5, 9, 3], "LIMIT 4")
+        check("number + 0 BETWEEN 3 AND 1026", [7, 5, 9, 3], "LIMIT 4")
+        verify_range_plan(across_chunks, 1024)
+
+    # The keys alone fit in 64 kB. Resolving the stored text exceeds that
+    # budget, so the original source must return the complete result instead.
+    wire.command(f"UPDATE {base} SET note=repeat('x',8192) WHERE id BETWEEN 100 AND 111", "UPDATE 12")
+    payload_query = f"SELECT length(note) AS n FROM {outer} WHERE number BETWEEN 100 AND 111 ORDER BY number"
+    expected = [("8192",)] * 6
+    wire.query(payload_query, rows=expected, tag="SELECT 6", fields=[("n", 23)])
+    verify_range_plan(payload_query, 12)
+    wire.command("SET work_mem='64kB'", "SET")
+    wire.query(payload_query, rows=expected, tag="SELECT 6", fields=[("n", 23)])
+    verify_range_plan(payload_query, None)
+    wire.command("RESET work_mem", "RESET")
 
     prepared = f"SELECT number FROM {outer} WHERE number BETWEEN $1 AND $2 ORDER BY number"
     name = b"view_range"
@@ -248,12 +274,15 @@ def exercise_ranges(wire, peer, schema, reference):
 
     wire.command("BEGIN ISOLATION LEVEL REPEATABLE READ", "BEGIN", b"T")
     check("number BETWEEN 29 AND 35", [29, 31, 33, 35], ready=b"T")
-    peer.command(f"UPDATE {base} SET id=2100 WHERE id=31", "UPDATE 1")
+    check(wide_condition, wide_rows, ready=b"T")
+    peer.command(f"UPDATE {base} SET id=4100 WHERE id=31", "UPDATE 1")
     check("number BETWEEN 29 AND 35", [29, 31, 33, 35], ready=b"T")
-    check("number BETWEEN 2099 AND 2101", [], ready=b"T")
+    verify_range_plan(check(wide_condition, wide_rows, ready=b"T"), None, ready=b"T")
+    check("number BETWEEN 4099 AND 4101", [], ready=b"T")
     wire.command("COMMIT", "COMMIT")
     check("number BETWEEN 29 AND 35", [29, 33, 35])
-    check("number BETWEEN 2099 AND 2101", [2100])
+    verify_range_plan(check(wide_condition, [n for n in wide_rows if n != 31]), 1023)
+    check("number BETWEEN 4099 AND 4101", [4100])
 
     wire.command("BEGIN ISOLATION LEVEL SERIALIZABLE", "BEGIN", b"T")
     serial = check("number BETWEEN 29 AND 35", [29, 33, 35], ready=b"T")

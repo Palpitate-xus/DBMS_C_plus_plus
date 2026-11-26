@@ -1,6 +1,17 @@
 # 更新日志
 
 <details>
+<summary>报表查上千个编号时也可以少读数据</summary>
+
+例如，查一段订单号时，如果这些订单集中存放，数据库可以用索引只读取相关的那部分数据。
+
+如果订单散落在表的大部分位置，或内存设置容不下这次读取，数据库会按原来的方式扫描表。
+
+2026-11-26 · [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#view-wide-key-ranges-20261126) · [性能报告](docs/performance-report-2026-10-30.md#view-wide-key-range-cost-20261126)
+
+</details>
+
+<details>
 <summary>从报表里查一段编号更快了</summary>
 
 例如，查编号 100 到 115 的订单时，数据库可以先用原表的索引找到这段编号，再按报表的条件筛选和分页。
@@ -23,18 +34,15 @@
 </details>
 
 <details>
-<summary>部分报表打开得更快了</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 部分报表打开得更快了
 
 例如，查看按条件筛出的订单时，数据库可以直接返回结果，省去先把结果另外存一遍的步骤。
 
 如果要修改或删除的数据一条都没找到，而且这次提交也没有其他改动，数据库可以少写一次日志。
 
-2026-11-26 · [测试报告](docs/test-report.md#view-read-and-empty-writes-20261126) · [性能报告](docs/performance-report-2026-10-30.md#view-read-and-empty-write-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
+[测试报告](docs/test-report.md#view-read-and-empty-writes-20261126) · [性能报告](docs/performance-report-2026-10-30.md#view-read-and-empty-write-cost-20261126)
 
 ## 2026-11-26 · 可以按报表算出的金额修改订单
 

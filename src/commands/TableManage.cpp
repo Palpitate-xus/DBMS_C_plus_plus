@@ -11392,10 +11392,7 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     // The working budget covers index keys, copied table rows, and any page
     // copy. An older index needs room for both its decimal and numeric keys.
     const size_t maxEntries = byteBudget / (2 * (sizeof(BPTree::LeafEntry) + sizeof(BPTree::IntegerEntry)));
-    constexpr size_t maxCompleteCandidates = 256;
-    if (completeRange) count = std::min(count, maxCompleteCandidates);
-    const size_t probeCount = completeRange ? maxCompleteCandidates + 1 : count;
-    if (probeCount > maxEntries || disjointRanges.size() > maxEntries) return {};
+    if ((!completeRange && count > maxEntries) || disjointRanges.size() > maxEntries) return {};
     for (size_t i = 0; i < disjointRanges.size(); ++i) {
         const auto [start, end] = disjointRanges[i];
         if (start > end || (i && start <= disjointRanges[i - 1].second) ||
@@ -11425,58 +11422,95 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
                 return entry.key >= *batchLower && entry.key <= *batchUpper;
             }));
     };
-    const size_t batchSize = filtered ? std::min(maxEntries, std::max(probeCount, size_t{32})) : probeCount;
+    const auto getAllocator = [&]() -> std::shared_ptr<PageAllocator> {
+        std::lock_guard<std::recursive_mutex> cache(cacheMutex_);
+        if (!getPageAllocator(dbname, tablename)) return {};
+        return pageAllocators_.at(dbname + "/" + tablename);
+    };
+    std::shared_ptr<PageAllocator> allocator;
+    const auto readCompleteRanges = [&] {
+        const size_t extent = allocator->numPages();
+        const size_t pageLimit = extent ? (extent - 1) / 2 : 0;
+        const size_t bitmapWords = extent / 64 + (extent % 64 != 0);
+        const size_t probeLimit = std::min(maxEntries, size_t{257});
+        const size_t probeBytes = probeLimit * sizeof(BPTree::IntegerEntry);
+        if (probeLimit < 2 || bitmapWords > (byteBudget - probeBytes) / sizeof(uint64_t)) return false;
+        const size_t candidateBudget = byteBudget - probeBytes - bitmapWords * sizeof(uint64_t);
+        // Keep room for both buffers during vector growth and for the result
+        // row descriptors. Payloads are charged when the actual rows are read.
+        const size_t candidateLimit = candidateBudget / (2 * sizeof(BPTree::IntegerEntry) + sizeof(HeapScanRow));
+        std::vector<uint64_t> pages(bitmapWords);
+        size_t candidatePages = 0;
+        for (size_t interval = 0; interval < std::max(size_t{1}, disjointRanges.size()); ++interval) {
+            if (disjoint) selectRange(interval);
+            std::optional<BPTree::IntegerEntry> tail;
+            for (;;) {
+                const size_t overlap = tail.has_value();
+                const size_t room = candidateLimit - candidates.size();
+                // An extra entry distinguishes a complete range from a full
+                // buffer. Each continuation repeats its boundary to check
+                // both that RID and the link into the next leaf.
+                const size_t requested = std::min(probeLimit, room + overlap + 1);
+                std::vector<BPTree::IntegerEntry> batch;
+                if (!readBatch(requested, batch) ||
+                    (tail && (batch.empty() || batch.front().key != tail->key || batch.front().value != tail->value)) ||
+                    batch.size() - overlap > room) return false;
+                for (size_t i = overlap; i < batch.size(); ++i) {
+                    uint32_t page;
+                    uint16_t slot;
+                    decodeRid(batch[i].value, page, slot);
+                    if (!page || page >= extent || encodeRid(page, slot) != batch[i].value) return false;
+                    auto& word = pages[page / 64];
+                    const uint64_t bit = uint64_t{1} << (page % 64);
+                    if (word & bit) continue;
+                    if (++candidatePages > pageLimit) return false;
+                    word |= bit;
+                }
+                const size_t required = candidates.size() + batch.size() - overlap;
+                if (required > candidates.capacity()) {
+                    const size_t current = candidates.capacity();
+                    candidates.reserve(std::max(required, current + std::min(current, candidateLimit - current)));
+                }
+                candidates.insert(candidates.end(), batch.begin() + overlap, batch.end());
+                if (batch.size() < requested) break;
+                tail = batch.back();
+                if (descending) batchUpper = tail->key;
+                else batchLower = tail->key;
+            }
+        }
+        return true;
+    };
+    const size_t batchSize = filtered ? std::min(maxEntries, std::max(count, size_t{32})) : count;
     result.orderedIndex = tree->usesSignedIntegerKeys();
     if (result.orderedIndex) {
         if ((bounded || filtered) && !tree->rootPage()) return {};
-        if (disjoint) selectRange(0);
-        if (completeRange && disjoint) {
-            // All intervals share one candidate limit and the same relation lock
-            // and read view. Nothing is exposed before the whole range is known.
-            candidates.reserve(probeCount);
-            for (size_t i = 0; i < disjointRanges.size(); ++i) {
-                selectRange(i);
-                std::vector<BPTree::IntegerEntry> interval;
-                const size_t room = probeCount - candidates.size();
-                if (!readBatch(room, interval) || interval.size() == room) return {};
-                candidates.insert(candidates.end(), interval.begin(), interval.end());
-            }
-        } else if (!readBatch(batchSize, candidates) ||
-                   (!bounded && !filtered && candidates.size() != count)) return {};
+        if (completeRange) {
+            allocator = getAllocator();
+            if (!allocator || !readCompleteRanges()) return {};
+        } else {
+            if (disjoint) selectRange(0);
+            if (!readBatch(batchSize, candidates) || (!bounded && !filtered && candidates.size() != count)) return {};
+        }
     } else if (bounded || filtered || !readLegacyIntegerIndexKeys(*tree,
         ExprHelper::canonicalResultTypeName(schema.cols[keyColumn].dataType),
         !schema.pkColIndices.empty(), descending, count, maxEntries, candidates)) return {};
-    // The last slot is a sentinel. A full buffer cannot establish that
-    // the index supplied the whole interval, even if it hit an endpoint.
-    if (completeRange && candidates.size() == probeCount) return {};
     result.indexEntries = candidates.size();
 
-    std::shared_ptr<PageAllocator> allocator;
-    {
-        std::lock_guard<std::recursive_mutex> cache(cacheMutex_);
-        if (!getPageAllocator(dbname, tablename)) return {};
-        allocator = pageAllocators_.at(dbname + "/" + tablename);
-    }
+    if (!allocator) allocator = getAllocator();
+    if (!allocator) return {};
     if (completeRange && !candidates.empty()) {
         // Preserve the ordinary heap's page and slot order for consumers
         // that use LIMIT, evaluate targets, or combine unsorted rows.
         std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
             return static_cast<uint64_t>(left.value) < static_cast<uint64_t>(right.value);
         });
-        size_t candidatePages = 0;
-        uint32_t lastPage = 0;
-        for (const auto& candidate : candidates) {
-            uint32_t page = 0;
-            uint16_t slot = 0;
-            decodeRid(candidate.value, page, slot);
-            if (page != lastPage) ++candidatePages;
-            lastPage = page;
-        }
-        const auto extent = allocator->numPages();
-        if (extent <= 1 || candidatePages > (extent - 1) / 2) return {};
     }
-    result.rows.reserve(std::min(count, candidates.size()));
     size_t remaining = byteBudget;
+    result.rows.reserve(std::min(count, candidates.size()));
+    if (completeRange) {
+        if (result.rows.capacity() > remaining / sizeof(HeapScanRow)) return {};
+        remaining -= result.rows.capacity() * sizeof(HeapScanRow);
+    }
     const size_t pageBytes = allocator->pageSize();
     std::unique_ptr<char[]> pageCopy;
     uint32_t copiedPage = 0;
@@ -11539,7 +11573,7 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         if (std::any_of(nullTests.begin(), nullTests.end(), [&](const auto& test) {
             return bitmap[test.column] != test.expectsNull;
         })) return true;
-        const size_t rowOverhead = sizeof(HeapScanRow) + bitmap.capacity() / 8;
+        const size_t rowOverhead = (completeRange ? 0 : sizeof(HeapScanRow)) + bitmap.capacity() / 8;
         if (keyBufferBytes > remaining || rowOverhead > remaining - keyBufferBytes ||
             raw.capacity() > remaining - keyBufferBytes - rowOverhead)
             return false;
@@ -11622,7 +11656,7 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
                     candidatePage(i) == candidatePage(i + 1);
                 if (!readCandidate(candidates[i], keyBufferBytes, samePageFollows)) return false;
             }
-            if (!filtered || result.rows.size() == count || candidates.size() < requested) return true;
+            if (completeRange || !filtered || result.rows.size() == count || candidates.size() < requested) return true;
             if (result.heapRowsFetched >= maxEntries) return false;
 
             // Overlap one key so the checked tree traversal still verifies a leaf

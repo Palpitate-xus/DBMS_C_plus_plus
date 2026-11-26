@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="view-wide-key-ranges-comparison-20261126"></a>
+## 2026-11-26 · 按记录位置选择较大范围的读取方式
+
+PostgreSQL 可以用索引生成候选行的位置，再按物理页顺序读表，减少分散取行的成本。SQLite 可以从匹配范围的首个索引项开始向后读取，用行编号访问需要的表记录。DuckDB 可用数据组的最小值和最大值跳过整组，相同条件在数据排列不同的表上会有不同的读取成本。 [PostgreSQL 位图扫描](https://www.postgresql.org/docs/18/indexes-bitmap-scans.html) · [SQLite 范围查找](https://www.sqlite.org/queryplanner.html#multiple_result_rows) · [DuckDB 索引指南](https://duckdb.org/docs/current/guides/performance/indexing#zonemaps)
+
+本项目分批访问受支持的整数主键索引，核对相邻批次的边界。满足内存和页覆盖条件时，按原表的页和行号顺序读取。涉及超过一半数据页时提前结束索引尝试。最后仍要验证行的可见性和主键值。通用代价估算和内存紧张时的有损位图仍有差距。 [测试报告](test-report.md#view-wide-key-ranges-20261126) · [性能报告](performance-report-2026-10-30.md#view-wide-key-range-cost-20261126)
+
 <a id="view-primary-key-ranges-comparison-20261126"></a>
 ## 2026-11-26 · 通过视图查询编号范围
 
