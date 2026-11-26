@@ -1,29 +1,33 @@
 # 更新日志
 
 <details>
-<summary>给表改列名后，原来的报表照常查询 · 2026-11-26</summary>
+<summary>表的列改名后，已有报表还能查 · 2026-11-26</summary>
 
-给原表的列换个名字后，使用已保存视图的报表可以继续按原列名查询。
+例如，把订单表的 `qty` 改成 `quantity` 后，通过已有视图做的报表仍可用 `qty` 查询。
 
-这一轮覆盖视图内使用 `SELECT *` 的子查询和公用表表达式，以及按同名列连接的常见写法。
+这次修复也覆盖视图中按同名列连接的常见写法，以及在子查询或 `WITH` 中用 `SELECT *` 读取所有列的写法。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#rename-view-star-and-join-20261126) · [性能报告](docs/performance-report-2026-10-30.md#rename-view-star-and-join-cost-20261126)
 
 </details>
 
 <details>
-<summary>改视图注释时少等磁盘 · 2026-11-26</summary>
+<summary>保存视图的说明更快了 · 2026-11-26</summary>
 
-在额外建了 64 张空表的磁盘测试中，修改视图注释的中位耗时从 47–60 毫秒降到 40–52 毫秒。
+在测试中，给视图保存一条说明比上一版快了约 7 到 12 毫秒。
+
+这个范围来自同一磁盘测试的三轮中位耗时，测试库里另外建了 64 张空表。
 
 [测试报告](docs/test-report.md#undo-stage-sync-20261126) · [性能报告](docs/performance-report-2026-10-30.md#undo-stage-sync-cost-20261126)
 
 </details>
 
 <details>
-<summary>给视图改名或换位置更快 · 2026-11-26</summary>
+<summary>给视图改名、换位置更快了 · 2026-11-26</summary>
 
-在额外建了 64 张空表的磁盘测试中，单独移动视图的中位耗时从 532–644 毫秒缩短到 67–90 毫秒。
+例如，单独把视图从 `sales.monthly` 移到 `archive.monthly` 时，只需要备份这次改动涉及的文件。
+
+在额外建了 64 张空表的磁盘测试中，单独移动视图的中位耗时从 532–644 毫秒降到 67–90 毫秒。
 
 [测试报告](docs/test-report.md#alter-view-file-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-file-undo-cost-20261126)
 
