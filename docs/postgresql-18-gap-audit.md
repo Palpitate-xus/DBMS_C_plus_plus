@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 减少查询准备时处理的列信息
+
+目录绑定只整理当前关系的有效列，并从同一份目录快照保留实际列顺序。受支持的多层视图在结果类型齐备时，直接用已绑定的列说明回复客户端。`CAT-02`、`QRY-12` 和 `PROTO-04` 保持部分实现。 [功能验证](test-report.md#bound-column-metadata-20261126) · [性能报告](performance-report-2026-10-30.md#bound-column-metadata-cost-20261126)
+
 ## 2026-11-26 · 在扩展查询中报告多层视图的列说明
 
 受支持的非递归 `WITH` 和派生查询可以在执行前报告普通视图的列名、类型、长度限制和来源。验证覆盖返回零行、二进制结果和重复引用同一 `WITH`。`QRY-12`、`PROTO-03` 和 `PROTO-04` 保持部分实现。 [功能验证](test-report.md#nested-view-columns-20261126) · [性能报告](performance-report-2026-10-30.md#nested-view-column-cost-20261126)

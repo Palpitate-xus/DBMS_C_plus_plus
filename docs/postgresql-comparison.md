@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 用已确定的类型生成列说明
+
+PostgreSQL 的 `Describe`、SQLite 的 `sqlite3_column_name` 和 DuckDB 的列类型接口都可以在执行前取得结果的列信息。本项目在多层视图的列类型已经确定时，用这些类型直接生成协议说明，并按绑定关系追溯列的来源。 [PostgreSQL 消息流程](https://www.postgresql.org/docs/18/protocol-flow.html#PROTOCOL-FLOW-EXT-QUERY) · [SQLite 列名接口](https://www.sqlite.org/c3ref/column_name.html) · [DuckDB 预编译语句接口](https://duckdb.org/docs/lts/clients/c/prepared) · [性能报告](performance-report-2026-10-30.md#bound-column-metadata-cost-20261126)
+
 ## 2026-11-26 · 执行前获取多层视图的列说明
 
 PostgreSQL 的扩展查询协议在 `Describe` 时返回列名、类型和来源等信息，即使随后查询结果为空。SQLite 可以在执行前从已准备的语句取得列名。DuckDB 的 C 接口也能从已准备的语句取得列名和逻辑类型。 [PostgreSQL 消息流程](https://www.postgresql.org/docs/18/protocol-flow.html) · [SQLite 列名接口](https://www.sqlite.org/c3ref/column_name.html) · [DuckDB 预编译语句接口](https://duckdb.org/docs/lts/clients/c/prepared)

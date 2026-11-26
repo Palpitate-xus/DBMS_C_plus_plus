@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>库里表多时，查报表更快了</summary>
+
+例如，库里还有上百张表时，打开订单报表前只整理查询涉及的表的列信息。客户端也能更快拿到列名和类型。
+
+2026-11-26 · [测试报告](docs/test-report.md#bound-column-metadata-20261126) · [性能报告](docs/performance-report-2026-10-30.md#bound-column-metadata-cost-20261126)
+
+</details>
+
+<details>
 <summary>客户端能显示报表的列名了</summary>
 
 用 psql 查看多层报表时，可以看到每列的名称和数据类型。即使没有符合条件的记录，也能查看列说明。
@@ -19,18 +28,15 @@
 </details>
 
 <details>
-<summary>查上千个订单号也能少读数据</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 查上千个订单号也能少读数据
 
 例如，要查 1,000 个连续的订单号，如果这些订单集中存放，数据库可以只读取表里相关的记录。
 
 如果订单散落在表的大部分位置，或内存设置容不下这次读取，数据库会按原来的方式扫描表。
 
-2026-11-26 · [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#view-wide-key-ranges-20261126) · [性能报告](docs/performance-report-2026-10-30.md#view-wide-key-range-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#view-wide-key-ranges-20261126) · [性能报告](docs/performance-report-2026-10-30.md#view-wide-key-range-cost-20261126)
 
 ## 2026-11-26 · 按一小段订单号查报表更快了
 

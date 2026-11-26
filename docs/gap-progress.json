@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 avoid sorting unrelated catalog attributes and reuse bound view column types",
+      "gap_ids": ["CAT-02", "QRY-12", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/indexed_view_reads_protocol_e2e_test.py", "tests/temp_alter_column_catalog_protocol_e2e_test.py"],
+      "verification": [
+        "Compare 72 text and binary cases with the previous build and PostgreSQL 18.6, including original column order after dropping an attribute.",
+        "Check restart behavior for files from the previous build and both committed and uncommitted writes.",
+        "Compare query and description latency at two catalog sizes with an independent previous-version control."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 describe result columns of ordinary views read through CTEs and derived queries",
       "gap_ids": ["QRY-12", "PROTO-03", "PROTO-04"],
       "status": "partial",

@@ -4847,12 +4847,26 @@ bool describePreparedResultShape(const ProtocolQuerySyntax& syntax, Session& ses
         struct Restore { Session* previous; ~Restore() { setCurrentSession(previous); } } restore{previous};
         const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql,
             protocolMetadataParameters(session, parameterOids), true);
-        QueryResult shape;
-        for (const auto& field : prepared.output) {
-            shape.columns.push_back(field.name);
-            shape.columnTypes.push_back(field.type);
+        if (nestedView && std::all_of(prepared.output.begin(), prepared.output.end(),
+                [](const auto& field) { return field.typeOid != INVALID_OID; })) {
+            // All types and modifiers are already bound. The legacy adapter
+            // would reparse SQL and infer names/types that we overwrite.
+            columns.clear();
+            columns.reserve(prepared.output.size());
+            for (const auto& field : prepared.output) {
+                auto& column = columns.emplace_back();
+                column.name = field.name;
+                column.moneyLocale = session.lcMonetary;
+            }
+            applyBoundProtocolDescriptor(columns, prepared.output, session);
+        } else {
+            QueryResult shape;
+            for (const auto& field : prepared.output) {
+                shape.columns.push_back(field.name);
+                shape.columnTypes.push_back(field.type);
+            }
+            columns = describeProtocolColumns(shape, sql, session, &prepared.output);
         }
-        columns = describeProtocolColumns(shape, sql, session, &prepared.output);
         if (functionSource || nestedView) retainPreparedProjectionOrigins(columns, prepared, session);
         return functionSource || !columns.empty();
     }

@@ -345,6 +345,14 @@ def exercise_view_column_descriptions(wire, schema):
         wire.send_statements(f"SELECT '{view}'::regclass::oid"))[0])
     number = (oid, 1, 23, 4, -1)
     label = (oid, 2, 1043, -1, 16)
+    base = f"{schema}.column_order"
+    ordered_view = f"{schema}.column_order_v"
+    wire.command(f"CREATE TABLE {base}(z int PRIMARY KEY, discarded bigint, a varchar(8))", "CREATE TABLE")
+    wire.command(f"INSERT INTO {base} VALUES (4, 99, 'word'), (5, 98, NULL)", "INSERT 0 2")
+    wire.command(f"ALTER TABLE {base} DROP COLUMN discarded", "ALTER TABLE")
+    wire.command(f"CREATE VIEW {ordered_view} AS SELECT * FROM {base}", "CREATE VIEW")
+    ordered_oid, = map(int, wire.client.data_row_values(
+        wire.send_statements(f"SELECT '{ordered_view}'::regclass::oid"))[0])
     sync = wire.packet(b"S")
     describe_statement = wire.packet(b"D", b"S\0")
     cases = (
@@ -352,10 +360,13 @@ def exercise_view_column_descriptions(wire, schema):
          "SELECT a.number AS a,b.number AS b FROM pick a CROSS JOIN pick b WHERE a.number<b.number ORDER BY a,b",
          [(b"a", *number), (b"b", *number)], [(3, 5), (3, 7), (5, 7)]),
         (f"SELECT d.label,d.number+1 AS computed FROM (SELECT * FROM {view}) AS d ORDER BY d.number",
-         [(b"label", *label), (b"computed", 0, 0, 23, 4, -1)], [("row-3", 4), ("row-5", 6), ("row-7", 8)]),
+         [(b"label", *label), (b"computed", 0, 0, 23, 4, -1)], [(b"row-3", 4), (b"row-5", 6), (b"row-7", 8)]),
         (f"WITH first_read AS (SELECT * FROM {view}), second_read(n,l) AS (SELECT * FROM first_read) "
          "SELECT l,n FROM second_read WHERE false",
          [(b"l", *label), (b"n", *number)], []),
+        (f"WITH first_read AS (SELECT * FROM {ordered_view}) SELECT * FROM first_read ORDER BY z",
+         [(b"z", ordered_oid, 1, 23, 4, -1), (b"a", ordered_oid, 2, 1043, -1, 12)],
+         [(4, b"word"), (5, None)]),
     )
     for sql, fields, values in cases:
         statement = wire.exchange(wire.parse(sql) + describe_statement + sync)
@@ -364,7 +375,7 @@ def exercise_view_column_descriptions(wire, schema):
         portal = wire.exchange(wire.bind(result_format=1) + wire.describe_portal() + wire.execute() + sync)
         assert [kind for kind, _ in portal] == [b"2", b"T"] + [b"D"] * len(values) + [b"C", b"Z"], (sql, portal)
         assert wire.client.row_description_fields(portal) == [(*field, 1) for field in fields]
-        expected = [[struct.pack("!i", cell) if isinstance(cell, int) else cell.encode()
+        expected = [[struct.pack("!i", cell) if isinstance(cell, int) else cell
                      for cell in row] for row in values]
         assert wire.client.data_row_values(portal) == expected, (sql, portal)
         assert portal[-2:] == [(b"C", f"SELECT {len(values)}\0".encode()), (b"Z", b"I")], (sql, portal)

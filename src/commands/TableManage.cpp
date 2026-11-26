@@ -42962,10 +42962,17 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                 for (const auto& ns : catalog.namespaces) if (ns.nspname == schema) namespaceId = ns.oid;
                 for (const auto& relation : catalog.relations) {
                     if (relation.relnamespace != namespaceId || relation.relname != requested.name) continue;
-                    auto attributes = catalog.attributes;
-                    std::sort(attributes.begin(), attributes.end(), [](const auto& a, const auto& b) { return a.attnum < b.attnum; });
-                    for (const auto& attribute : attributes) {
-                        if (attribute.attrelid != relation.oid || attribute.attnum <= 0 || attribute.attisdropped) continue;
+                    // The snapshot owns the rows for the entire bind. Only
+                    // order this relation's visible columns, without copying
+                    // and sorting every attribute in the database.
+                    std::vector<const PgAttributeRow*> attributes;
+                    for (const auto& attribute : catalog.attributes)
+                        if (attribute.attrelid == relation.oid && attribute.attnum > 0 && !attribute.attisdropped)
+                            attributes.push_back(&attribute);
+                    std::sort(attributes.begin(), attributes.end(),
+                        [](const auto* a, const auto* b) { return a->attnum < b->attnum; });
+                    for (const auto* row : attributes) {
+                        const auto& attribute = *row;
                         std::string typeName = "unknown";
                         bool arrayType = attribute.attndims > 0;
                         Oid valueType = attribute.atttypid;
