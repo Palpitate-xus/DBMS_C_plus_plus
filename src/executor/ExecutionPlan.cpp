@@ -1259,7 +1259,7 @@ struct TypedSortRowCodec {
     // borrow cells instead, so validate their independent cache descriptor.
     std::optional<size_t> integers = std::nullopt;
     size_t deferredColumns = 0;
-    mutable std::shared_ptr<typed_sort_detail::GeneratedRegistry> generatedRegistry; // lazy actual spill metadata only
+    mutable std::shared_ptr<typed_sort_detail::InputRegistry> inputRegistry;
     struct Header { uint64_t raw=0,cells=0,keys=0,integers=0,targets=0,ordinal=0,deferredNulls=0; };
     size_t bytes(const TypedSortRow& row) const {
         using namespace typed_sort_detail;
@@ -1288,11 +1288,9 @@ struct TypedSortRowCodec {
             writer.scalar(uint8_t(value.has_value()));if(value)writer.scalar(*value);
         }
         // BoundedRuns uses this same codec for all its writes/reads/merges.
-        // Allocate only when a real generated context is actually spilled;
-        // ordinary/SetSort owner algorithms and zero-demand paths are intact.
-        if(row.context.hasGeneratedInputs() && !generatedRegistry)
-            generatedRegistry=std::make_shared<typed_sort_detail::GeneratedRegistry>();
-        typed_sort_detail::writeContext(writer,row.context,generatedRegistry.get());
+        if(row.context.hasAttachedInputs() && !inputRegistry)
+            inputRegistry=std::make_shared<typed_sort_detail::InputRegistry>();
+        typed_sort_detail::writeContext(writer,row.context,inputRegistry.get());
         for(const auto& value:row.targets) {
             writer.scalar(uint8_t(value.has_value()));if(value)typed_sort_detail::writeValue(writer,*value);
         }
@@ -1325,7 +1323,7 @@ struct TypedSortRowCodec {
             const auto present=reader.scalar<uint8_t>();if(present>1)typed_sort_detail::invalid("integer cache flag");
             row.integerKeys.push_back(present?std::optional<int64_t>(reader.scalar<int64_t>()):std::nullopt);
         }
-        row.context=typed_sort_detail::readContext(reader,generatedRegistry.get());
+        row.context=typed_sort_detail::readContext(reader,inputRegistry.get());
         if(header.targets>reader.remaining())typed_sort_detail::invalid("target cache count");
         row.targets.reserve(static_cast<size_t>(header.targets));
         for(uint64_t i=0;i<header.targets;++i) {

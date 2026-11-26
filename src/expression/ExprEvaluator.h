@@ -84,6 +84,30 @@ struct CompoundDatum {
     uint32_t validatedArrayDomainOid = 0;
 };
 
+// A projected source owns its input values and has a statement-local reader.
+// The reference site distinguishes independent reads of the same expression.
+struct ProjectedColumnSite {
+    size_t source;
+    size_t column;
+    const Expr* reference;
+};
+struct ProjectedColumnSource {
+    using Cells = std::shared_ptr<const std::vector<ExprValue>>;
+    size_t inputWidth;
+    size_t outputWidth;
+    std::function<ExprValue(const Cells&, ProjectedColumnSite)> read;
+};
+struct RowInputState {
+    struct Input {GeneratedReadPtr read;bool present=false;};
+    struct Projection {
+        std::shared_ptr<const ProjectedColumnSource> source;
+        ProjectedColumnSource::Cells cells;
+    };
+    std::map<std::pair<size_t,size_t>,Input> bound;
+    std::map<std::string,Input> named;
+    std::map<size_t,Projection> projected;
+};
+
 // ----------------------------------------------------------------------------
 // 行上下文：为列引用提供值
 // ----------------------------------------------------------------------------
@@ -115,11 +139,13 @@ public:
     const ExprValue* findBoundColumn(size_t sourceOrdinal, size_t columnOrdinal) const;
     void setGeneratedBound(size_t source,size_t column,GeneratedReadPtr read,bool present);
     void setGeneratedNamed(const std::string& key,GeneratedReadPtr read,bool present);
-    const GeneratedInputState::Input* generatedBound(size_t source,size_t column) const;
-    const GeneratedInputState::Input* generatedNamed(const std::string& key) const;
-    bool hasGeneratedInputs() const {return bool(generatedInputs_);}
+    const RowInputState::Input* generatedBound(size_t source,size_t column) const;
+    const RowInputState::Input* generatedNamed(const std::string& key) const;
+    const RowInputState::Projection* projectedSource(size_t source) const;
+    void setProjectedSource(size_t source, RowInputState::Projection projection);
+    bool hasAttachedInputs() const {return bool(attachedInputs_);}
     void copyGeneratedSource(const RowContext& source,size_t ordinal);
-    void clearGeneratedSource(size_t ordinal);
+    void clearAttachedSource(size_t ordinal);
 
 
 private:
@@ -130,7 +156,7 @@ private:
     std::map<std::string, ExprValue> values_;
     std::vector<ExprValue> parameters_;
     std::map<std::pair<size_t, size_t>, ExprValue> boundColumns_;
-    std::shared_ptr<const GeneratedInputState> generatedInputs_;
+    std::shared_ptr<const RowInputState> attachedInputs_;
     static std::string normalize(const std::string& s);
 };
 
@@ -153,7 +179,8 @@ public:
         return expr ? eval(expr.get(), ctx) : ExprValue{};
     }
 
-    ExprValue readBoundColumn(size_t source,size_t column,const RowContext&) const;
+    ExprValue readBoundColumn(size_t source,size_t column,const RowContext&,
+                              const Expr* reference=nullptr) const;
     ExprValue readNamedColumn(const std::string&,const RowContext&) const;
     // Row-local helpers can provide values only when evaluation reaches a
     // named column. Presence/type probes still use RowContext declarations;
@@ -163,11 +190,14 @@ public:
     void setNamedColumnReader(NamedColumnReader reader) {
         namedColumnReader_ = std::move(reader);
     }
+    void setProjectedReferenceResolver(std::function<const Expr*(const Expr*)> resolver) {
+        projectedReference_ = std::move(resolver);
+    }
     using NamespaceColumnReader = std::function<std::optional<std::string_view>(const Expr*, const RowContext&)>;
     void setNamespaceColumnReader(NamespaceColumnReader reader) {
         namespaceColumnReader_ = std::move(reader);
     }
-    ExprValue evaluateGenerated(const GeneratedInputState::Input&,const RowContext&) const;
+    ExprValue evaluateGenerated(const RowInputState::Input&,const RowContext&) const;
     ExprValue assignGenerated(const Expr* actualExpression,const RowContext&,
         const ExprValue&,const GeneratedColumnProgram&) const;
 
@@ -254,6 +284,7 @@ private:
     ExprValue evalSqlValue(const FunctionCallExpr*,const RowContext&) const;
     ScalarSubqueryExecutor scalarSubqueryExecutor_;
     NamedColumnReader namedColumnReader_;
+    std::function<const Expr*(const Expr*)> projectedReference_;
     NamespaceColumnReader namespaceColumnReader_;
     QuantifiedExecutor quantifiedExecutor_;
     struct GeneratedEvaluationState;

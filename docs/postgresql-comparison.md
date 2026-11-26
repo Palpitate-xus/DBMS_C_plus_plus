@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 写入时使用视图的计算列
+
+PostgreSQL 会在改写写入语句时，把调用方引用的视图列替换为底层列或视图表达式。SQLite 依靠视图触发器处理写入。DuckDB 的视图保存定义查询，读取时执行该查询。 [PostgreSQL 改写代码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/rewrite/rewriteHandler.c#L3629-L3645) · [SQLite CREATE VIEW](https://www.sqlite.org/lang_createview.html) · [DuckDB CREATE VIEW](https://duckdb.org/docs/2.0/sql/statements/create_view)
+
+本项目逐层找到可以赋值的原表列，并在查询需要时用对应的行计算视图结果。普通直连列仍按原表位置读取。写入条件、检查选项和 `RETURNING` 分别使用对应的行。 [功能测试](test-report.md#computed-view-writes-20261126) · [性能报告](performance-report-2026-10-30.md#computed-view-write-cost-20261126)
+
 ## 2026-11-26 · 在写入前识别只读视图
 
 PostgreSQL 按查询结构判断能否改写为对底表的操作。它还区分直接引用的列和计算列，并按具体命令处理 `INSTEAD OF` 触发器。SQLite 的普通视图可通过 `INSTEAD OF` 触发器处理写入。DuckDB 的普通视图保存查询，读取时执行。 [PostgreSQL 可更新视图](https://www.postgresql.org/docs/18/sql-createview.html#SQL-CREATEVIEW-UPDATABLE-VIEWS) · [PostgreSQL 改写实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/rewrite/rewriteHandler.c#L2539-L2649) · [SQLite CREATE VIEW](https://www.sqlite.org/lang_createview.html) · [DuckDB CREATE VIEW](https://duckdb.org/docs/2.0/sql/statements/create_view)

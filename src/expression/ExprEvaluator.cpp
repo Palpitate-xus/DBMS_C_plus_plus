@@ -924,36 +924,61 @@ void RowContext::setGeneratedBound(size_t source,size_t column,GeneratedReadPtr 
        column>=read->program->inputs.size() ||
        read->program->inputs[column].dataName!=read->program->target.dataName)
         throw DbError("XX000","generated source attachment changed its actual occurrence/attribute");
-    auto state=generatedInputs_?std::make_shared<GeneratedInputState>(*generatedInputs_):std::make_shared<GeneratedInputState>();
+    auto state=attachedInputs_?std::make_shared<RowInputState>(*attachedInputs_):std::make_shared<RowInputState>();
+    state->projected.erase(source);
     state->bound[{source,column}]={std::move(read),present};
     // Omitted virtual input is not a fabricated SQL NULL/empty scalar cell.
-    boundColumns_.erase({source,column});generatedInputs_=std::move(state);
+    boundColumns_.erase({source,column});attachedInputs_=std::move(state);
 }
 void RowContext::setGeneratedNamed(const std::string& key,GeneratedReadPtr read,bool present) {
-    auto state=generatedInputs_?std::make_shared<GeneratedInputState>(*generatedInputs_):std::make_shared<GeneratedInputState>();
-    state->named[normalize(key)]={std::move(read),present};generatedInputs_=std::move(state);
+    auto state=attachedInputs_?std::make_shared<RowInputState>(*attachedInputs_):std::make_shared<RowInputState>();
+    state->named[normalize(key)]={std::move(read),present};attachedInputs_=std::move(state);
 }
-const GeneratedInputState::Input* RowContext::generatedBound(size_t source,size_t column) const {
-    if(!generatedInputs_)return nullptr;
-    const auto found=generatedInputs_->bound.find({source,column});
-    return found==generatedInputs_->bound.end()?nullptr:&found->second;
+const RowInputState::Input* RowContext::generatedBound(size_t source,size_t column) const {
+    if(!attachedInputs_)return nullptr;
+    const auto found=attachedInputs_->bound.find({source,column});
+    return found==attachedInputs_->bound.end()?nullptr:&found->second;
 }
-const GeneratedInputState::Input* RowContext::generatedNamed(const std::string& key) const {
-    if(!generatedInputs_)return nullptr;
-    const auto found=generatedInputs_->named.find(normalize(key));
-    return found==generatedInputs_->named.end()?nullptr:&found->second;
+const RowInputState::Input* RowContext::generatedNamed(const std::string& key) const {
+    if(!attachedInputs_)return nullptr;
+    const auto found=attachedInputs_->named.find(normalize(key));
+    return found==attachedInputs_->named.end()?nullptr:&found->second;
 }
-void RowContext::clearGeneratedSource(size_t ordinal) {
-    if(!generatedInputs_)return;
-    auto state=std::make_shared<GeneratedInputState>(*generatedInputs_);
-    for(auto i=state->bound.begin();i!=state->bound.end();)
-        if(i->first.first==ordinal)i=state->bound.erase(i);else ++i;
-    generatedInputs_=(state->bound.empty()&&state->named.empty())?nullptr:std::move(state);
+const RowInputState::Projection* RowContext::projectedSource(size_t source) const {
+    if (!attachedInputs_) return nullptr;
+    const auto found = attachedInputs_->projected.find(source);
+    return found == attachedInputs_->projected.end() ? nullptr : &found->second;
+}
+void RowContext::setProjectedSource(size_t source, RowInputState::Projection projection) {
+    if (!projection.source || !projection.source->read || !projection.cells ||
+        projection.cells->size() != projection.source->inputWidth)
+        throw DbError("XX000", "projected source row differs from its input declaration");
+    clearAttachedSource(source);
+    for (auto i = boundColumns_.lower_bound({source,0});
+         i != boundColumns_.end() && i->first.first == source;)
+        i = boundColumns_.erase(i);
+    auto state = attachedInputs_ ? std::make_shared<RowInputState>(*attachedInputs_) :
+        std::make_shared<RowInputState>();
+    state->projected.emplace(source, std::move(projection));
+    attachedInputs_ = std::move(state);
+}
+void RowContext::clearAttachedSource(size_t ordinal) {
+    if (!attachedInputs_) return;
+    const auto first = attachedInputs_->bound.lower_bound({ordinal,0});
+    if ((first == attachedInputs_->bound.end() || first->first.first != ordinal) &&
+        !attachedInputs_->projected.count(ordinal)) return;
+    auto state = std::make_shared<RowInputState>(*attachedInputs_);
+    for (auto i = state->bound.lower_bound({ordinal,0});
+         i != state->bound.end() && i->first.first == ordinal;)
+        i = state->bound.erase(i);
+    state->projected.erase(ordinal);
+    attachedInputs_ = (state->bound.empty() && state->named.empty() && state->projected.empty()) ?
+        nullptr : std::move(state);
 }
 void RowContext::copyGeneratedSource(const RowContext& source,size_t ordinal) {
-    clearGeneratedSource(ordinal);
-    if(!source.generatedInputs_)return;
-    for(const auto& item:source.generatedInputs_->bound)
+    clearAttachedSource(ordinal);
+    if(!source.attachedInputs_)return;
+    for(const auto& item:source.attachedInputs_->bound)
         if(item.first.first==ordinal)setGeneratedBound(ordinal,item.first.second,item.second.read,item.second.present);
 }
 
@@ -1047,8 +1072,17 @@ GeneratedReadPtr bindGeneratedColumn(std::shared_ptr<const GeneratedColumnProgra
     auto read=std::make_shared<GeneratedColumnRead>();read->program=std::move(program);
     read->sourceOrdinal=source;read->names=names;read->named=!names.empty();read->rawStoredInputs=rawStoredInputs;return read;
 }
-ExprValue ExprEvaluator::readBoundColumn(size_t source,size_t column,const RowContext& row) const {
-    if(const auto* input=row.generatedBound(source,column))return evaluateGenerated(*input,row);
+ExprValue ExprEvaluator::readBoundColumn(size_t source,size_t column,const RowContext& row,
+                                         const Expr* reference) const {
+    if (row.hasAttachedInputs()) {
+        if (const auto* input = row.generatedBound(source,column)) return evaluateGenerated(*input,row);
+        if (const auto* input = row.projectedSource(source)) {
+            if (column >= input->source->outputWidth)
+                throw DbError("XX000", "projected column is outside its declaration");
+            if (reference && projectedReference_) reference = projectedReference_(reference);
+            return input->source->read(input->cells, {source,column,reference});
+        }
+    }
     auto value = row.boundColumn(source,column);
     if (!value.isNull && value.value.empty() && value.typeName == "pg_node_tree")
         throw DbError("0A000", "catalog expression has no supported node encoding");
@@ -1061,7 +1095,7 @@ ExprValue ExprEvaluator::readNamedColumn(const std::string& key,const RowContext
     }
     const auto value=row.get(key);return value?*value:ExprValue("unknown","",true);
 }
-ExprValue ExprEvaluator::evaluateGenerated(const GeneratedInputState::Input& input,const RowContext& row) const {
+ExprValue ExprEvaluator::evaluateGenerated(const RowInputState::Input& input,const RowContext& row) const {
     if(!input.read || !input.read->program)throw DbError("XX000","generated input lost its frozen declaration");
     try {
     const auto& read=*input.read;const auto& program=*read.program;
@@ -2164,7 +2198,7 @@ ExprValue ExprEvaluator::evalColumnRef(const ColumnRefExpr* e, const RowContext&
         return value;
     };
     if (e->binding)
-        return storedDependency(readBoundColumn(e->binding->sourceOrdinal, e->binding->columnOrdinal,ctx));
+        return storedDependency(readBoundColumn(e->binding->sourceOrdinal, e->binding->columnOrdinal,ctx,e));
     // A qualified reference must win over an unqualified value with the same
     // column name. This is essential for joins and UPDATE ... FROM, where
     // the target and source relations commonly share column names.

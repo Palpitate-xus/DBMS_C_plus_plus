@@ -44,11 +44,6 @@ struct GeneratedColumnRead {
     bool rawStoredInputs=false;
 };
 using GeneratedReadPtr=std::shared_ptr<const GeneratedColumnRead>;
-struct GeneratedInputState {
-    struct Input {GeneratedReadPtr read;bool present=false;};
-    std::map<std::pair<size_t,size_t>,Input> bound;
-    std::map<std::string,Input> named;
-};
 GeneratedRelationPtr makeGeneratedRelation(const TableSchema&,const std::string&,
     StorageEngine*,const std::vector<DatumTypePtr>& types={},
     std::shared_ptr<const DatumMetadataContext> metadata={},

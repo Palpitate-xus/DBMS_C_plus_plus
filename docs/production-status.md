@@ -6,6 +6,10 @@
 
 截至 2026-11-26，273 项功能要求中有 22 项完成、170 项部分实现、66 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-26 · 写入时使用视图的计算列
+
+受支持的普通视图可以用计算列筛选、检查或返回写入结果。数据仍写到对应的原表列。返回结果时可以分别读取修改前后的值。 [用法](MANUAL.md#9-视图与物化视图) · [测试报告](test-report.md#computed-view-writes-20261126) · [性能报告](performance-report-2026-10-30.md#computed-view-write-cost-20261126)
+
 ## 2026-11-26 · 表改列名后，视图可以继续使用原列名
 
 受测普通视图保留原来的输出列名、类型和数据，包括使用 `SELECT *` 的子查询与公用表表达式，以及 `JOIN USING` 和 `NATURAL JOIN`。 [测试报告](test-report.md#rename-view-star-and-join-20261126) · [性能报告](performance-report-2026-10-30.md#rename-view-star-and-join-cost-20261126)

@@ -2324,11 +2324,19 @@ SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
 
 可以用 `INSERT`、`UPDATE` 和 `DELETE` 操作已识别为可写、直接读取一张表的普通视图。按视图的列名和顺序提供数据，数据库会找到其对应的表列。`UPDATE` 和 `DELETE` 也会应用视图里的 `WHERE`，`RETURNING` 输出视图的列名。改过表列名或调整连接的 `search_path` 后，写入仍使用视图原先选择的表和列。 [写入与回滚测试](test-report.md#writable-view-projection-20261126)
 
+普通视图还可以带计算列。例如，下列语句按金额筛选订单，给匹配的订单各加一件，再返回修改前后的金额。可以修改 `qty`，金额随之重新计算。直接给 `amount` 赋值会报错。 [计算列测试](test-report.md#computed-view-writes-20261126)
+
+```sql
+CREATE VIEW order_prices AS SELECT id, qty, qty * 2 AS amount FROM orders;
+UPDATE order_prices SET qty = qty + 1 WHERE amount > 20
+RETURNING id, old.amount AS previous_amount, new.amount AS current_amount;
+```
+
 汇总、去重、取前几行和带窗口函数的视图默认只读。向这些视图写入时会收到 `55000`，底表数据保持原样。有对应 `INSTEAD OF` 触发器的直接写入仍可由该触发器处理。 [只读视图测试](test-report.md#read-only-view-writes-20261126)
 
 直接读取表列的普通视图改列名后，受支持的写入用新名称关联原表列。对直接从单表或逐层从单个视图读取列的定义，`INSERT` 和 `UPDATE` 会应用 `WITH CHECK OPTION`。例如，只显示正数的视图可以拒绝把零或负数写进表里。检查读取实际要存入的数据，包括表默认值。一次写多行时，一行失败会撤销整条语句。 [写入检查](test-report.md#view-check-option-20261126)
 
-`WITH LOCAL CHECK OPTION` 检查本层的条件，下层自己设置的检查也会执行。`WITH CASCADED CHECK OPTION` 继续检查所有下层视图的条件，省略 `LOCAL` 或 `CASCADED` 时使用后一种。分区表、通过视图触发器写入时的级联检查、`MERGE`、`ON CONFLICT` 和以 `WITH` 开头的写入仍待覆盖。 [功能范围](postgresql-18-gap-audit.md)
+`WITH LOCAL CHECK OPTION` 检查本层的条件，下层自己设置的检查也会执行。`WITH CASCADED CHECK OPTION` 继续检查所有下层视图的条件，省略 `LOCAL` 或 `CASCADED` 时使用后一种。检查可以使用下层视图的计算列，也适用于受测的带 `WITH` 的写入。分区表、通过视图触发器写入时的级联检查、`MERGE` 和 `ON CONFLICT` 仍有缺口。 [功能范围](postgresql-18-gap-audit.md)
 
 创建视图时，也可以把 `WITH (check_option = local)` 或 `WITH (check_option = cascaded)` 写在 `AS` 前面。已有视图可以用 `ALTER VIEW sales.monthly SET (check_option = cascaded)` 开启或切换检查，用 `ALTER VIEW sales.monthly RESET (check_option)` 关闭本层的检查。下层视图自己开启的检查仍会执行。执行者需要拥有视图并能访问它所在的模式。带 `IF EXISTS` 可以跳过不存在的视图。 [设置与回滚测试](test-report.md#alter-view-check-option-20261126)
 

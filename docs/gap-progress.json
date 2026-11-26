@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 read computed view columns on demand during writes",
+      "gap_ids": ["CAT-16", "DML-01", "DML-03", "TXN-05"],
+      "status": "partial",
+      "evidence": ["src/commands/DmlExecutor.cpp", "src/expression/ExprEvaluator.cpp", "src/executor/TypedSortSpill.h", "src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/computed_view_writes.sql", "tests/writable_view_projection_protocol_e2e_test.py", "tests/generated_context_spill_validation_test.cpp"],
+      "verification": [
+        "Compare nested view writes, assignment errors, check options, OLD and NEW values, and sequence calls against PostgreSQL 18.6.",
+        "Verify binary array results, Describe without data changes, and temporary sort snapshots without evaluating the projection.",
+        "Restart after rejected, uncommitted and committed writes on two filesystems, and compare the cost of shared input rows with a full-copy implementation."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 reject writes to structurally read-only views before rewriting or execution",
       "gap_ids": ["CAT-16", "DML-01", "DML-03", "SQL-11"],
       "status": "partial",

@@ -28,7 +28,7 @@ struct Temporary {
 struct Frame {uint64_t offset=0,source=0,column=0,id=0;};
 struct Written {
     Temporary file;
-    typed_sort_detail::GeneratedRegistry registry;
+    typed_sort_detail::InputRegistry registry;
     uint64_t extent=0;
     void write(const RowContext& row) {
         sort_detail::Writer writer(file.fd,4096);
@@ -171,11 +171,32 @@ int main() {
     check("decoded context owns its recipes after registry release",[&] {
         written.registry.reads.clear();return value(evaluator.readBoundColumn(left,v,detached),"6");
     });
+    check("spill keeps deferred projection inputs without reading them",[&] {
+        auto reads=std::make_shared<size_t>(0);
+        auto projected=std::make_shared<ProjectedColumnSource>(ProjectedColumnSource{
+            1,1,[reads](const ProjectedColumnSource::Cells& cells,ProjectedColumnSite) {
+                ++*reads;
+                return ExprValue("integer",std::to_string(cells->front().asInt()*2));
+            }});
+        auto row=actual;
+        row.setProjectedSource(left,{projected,std::make_shared<const std::vector<ExprValue>>(
+            std::vector<ExprValue>{actual.boundColumn(left,id)})});
+        Written spilled;
+        spilled.write(row);
+        auto decoded=spilled.read();
+        spilled.registry.projections.clear();
+        if (*reads || decoded.generatedBound(left,v) || decoded.findBoundColumn(left,id) ||
+            !value(evaluator.readBoundColumn(right,v,decoded),"6")) return false;
+        if (!value(evaluator.readBoundColumn(left,0,decoded),"10") ||
+            !value(evaluator.readBoundColumn(left,0,decoded),"10") || *reads!=2) return false;
+        row.clearAttachedSource(left);
+        return !row.projectedSource(left) && decoded.projectedSource(left) && actual.generatedBound(left,v);
+    });
     std::weak_ptr<PreparedQuery> queryLife=query;
     check("actual decoded recipe does not retain the parent query",[&] {
         execution.reset();query.reset();return queryLife.expired() && value(evaluator.readBoundColumn(left,v,detached),"6");
     });
     const bool dropped=g_engine.dropDatabase(db)==DBStatus::OK;cleanupTestDb("generated_context_spill");
-    std::cout<<"GENERATED_CONTEXT_SPILL_TERMINAL controls="<<count<<" expected=10 failures="<<failed<<" dropped="<<dropped<<'\n';
-    return count==10 && !failed && dropped?0:1;
+    std::cout<<"GENERATED_CONTEXT_SPILL_TERMINAL controls="<<count<<" expected=11 failures="<<failed<<" dropped="<<dropped<<'\n';
+    return count==11 && !failed && dropped?0:1;
 }

@@ -764,6 +764,10 @@ PreparedQueryExecution::PreparedQueryExecution(std::shared_ptr<PreparedQuery> qu
         children_.emplace(expression, std::move(child));
     }
     evaluator_.setCurrentDB(database_);
+    evaluator_.setProjectedReferenceResolver([this](const Expr* reference) {
+        const auto found = originalSites_.find(reference);
+        return found == originalSites_.end() ? reference : found->second;
+    });
     evaluator_.setScalarSubqueryExecutor([this](const Expr* expression, const RowContext& row) {
         const auto found = originalSites_.find(expression);
         if (found == originalSites_.end()) throw DbError("XX000", "compiled child has no prepared site");
@@ -832,7 +836,7 @@ void PreparedQueryExecution::setSourceRow(RowContext& row, size_t ordinal,
             types.push_back(ExprHelper::canonicalResultTypeName(column.type));
         declaration = sourceColumnTypes_.emplace(ordinal, std::move(types)).first;
     }
-    row.clearGeneratedSource(ordinal);
+    row.clearAttachedSource(ordinal);
     for (size_t i = 0; i < cells.size(); ++i) {
         auto& cell = cells[i];
         const auto& type = declaration->second[i];
@@ -879,7 +883,7 @@ void PreparedQueryExecution::setSourceInputs(RowContext& row,size_t source,
     if(!range.generatedRelation){setSourceRow(row,source,std::move(cells));return;}
     if(cells.size()!=range.columns.size() || range.generatedRelation->columns.size()!=cells.size())
         throw DbError("XX000","generated source inputs lost the real declaration width");
-    row.clearGeneratedSource(source);
+    row.clearAttachedSource(source);
     for(size_t i=0;i<cells.size();++i) {
         if(auto read=generatedSourceRead(source,i)){row.setGeneratedBound(source,i,std::move(read),present);continue;}
         auto cell=present?std::move(cells[i]):nullExtendedSourceCell(range.columns[i]);
@@ -890,6 +894,12 @@ void PreparedQueryExecution::setSourceInputs(RowContext& row,size_t source,
     }
 }
 void PreparedQueryExecution::copySourceInputs(RowContext& row,size_t source,const RowContext* actual) const {
+    if (const auto* input = actual ? actual->projectedSource(source) : nullptr) {
+        if (input->source->outputWidth != sourceRange(source).columns.size())
+            throw DbError("XX000", "copied projection differs from its source declaration");
+        row.setProjectedSource(source, *input);
+        return;
+    }
     const auto& range=sourceRange(source);std::vector<ExprValue> cells;cells.reserve(range.columns.size());
     for(size_t i=0;i<range.columns.size();++i) {
         if(generatedSourceRead(source,i))cells.emplace_back();
@@ -1187,8 +1197,9 @@ void PreparedJoinKeyFilter::reset() {
     lookupState_ = LookupState::Reading;
 }
 
-ExprValue PreparedQueryExecution::readSourceColumn(const RowContext& row,size_t source,size_t column) const {
-    return evaluator_.readBoundColumn(source,column,row);
+ExprValue PreparedQueryExecution::readSourceColumn(const RowContext& row,size_t source,size_t column,
+                                                   const Expr* reference) const {
+    return evaluator_.readBoundColumn(source,column,row,reference);
 }
 
 ExprValue PreparedQueryExecution::evaluateMergedUsing(const PreparedQuery::SourceRange& merged,
@@ -2233,7 +2244,7 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
             adapter.projectionAliases.emplace_back(alias.first - child.begin, alias.second);
     for (const auto* column : child.correlations) {
         const auto& binding = *column->binding;
-        ExprValue cell = readSourceColumn(row,binding.sourceOrdinal,binding.columnOrdinal);
+        ExprValue cell = readSourceColumn(row,binding.sourceOrdinal,binding.columnOrdinal,column);
         const auto type = ExprHelper::canonicalResultTypeName(binding.declaredType);
         if (ExprHelper::canonicalResultTypeName(cell.typeName) != type)
             throw DbError("XX000", "correlated runtime cell has an unexpected declared type");

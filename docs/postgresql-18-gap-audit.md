@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 写入时使用视图的计算列
+
+受支持的嵌套视图可以用计算列筛选目标、计算要写入的数据、检查新行和返回旧值及新值。实际写入目标必须是直接引用的表列。普通视图的 `MERGE`、`ON CONFLICT`、分区表的写入检查和嵌套视图触发器仍有缺口。`CAT-16`、`DML-01`、`DML-03` 和 `TXN-05` 保持部分实现。 [功能测试](test-report.md#computed-view-writes-20261126) · [性能报告](performance-report-2026-10-30.md#computed-view-write-cost-20261126)
+
 ## 2026-11-26 · 拒绝写入只读视图
 
-`INSERT`、`UPDATE` 和 `DELETE` 根据视图保存的查询判断是否可写。汇总、去重、限制行数、连接和其他只读视图会返回 `55000`，包括通过另一层视图发出的写入。`PREPARE` 和带写入的 `WITH` 会提前检查。直接读取原表列的可写视图支持受测的 SQL `PREPARE` / `EXECUTE` 和带 `WITH` 的写入。表列与计算列混合时，支持只给表列赋值的 `INSERT`，计算列的读取和结果返回仍有差距。`CAT-16`、`DML-01`、`DML-03`、`SQL-11` 保持部分实现。 [功能测试](test-report.md#read-only-view-writes-20261126) · [性能报告](performance-report-2026-10-30.md#read-only-view-write-cost-20261126)
+`INSERT`、`UPDATE` 和 `DELETE` 根据视图保存的查询判断是否可写。汇总、去重、限制行数、连接和其他只读视图会返回 `55000`，包括通过另一层视图发出的写入。`PREPARE` 和带写入的 `WITH` 会提前检查。直接读取原表列的可写视图支持受测的 SQL `PREPARE` / `EXECUTE` 和带 `WITH` 的写入。`CAT-16`、`DML-01`、`DML-03`、`SQL-11` 保持部分实现。 [功能测试](test-report.md#read-only-view-writes-20261126) · [性能报告](performance-report-2026-10-30.md#read-only-view-write-cost-20261126)
 
 ## 2026-11-26 · 修改已有视图的写入检查
 
@@ -16,7 +20,7 @@
 
 ## 2026-11-26 · 通过视图写入时检查新行
 
-对直接读取底表列的单层和多层普通视图，`INSERT` 和 `UPDATE` 检查经过表默认值、存储生成列和表约束处理后的新行。支持 `LOCAL`、`CASCADED` 以及 `44000` 错误语义，多行语句中有一行失败会撤销整条语句。分区表、通过视图触发器写入时的级联检查、计算列组成的视图、`MERGE` 和 `ON CONFLICT` 仍有差距。`CAT-16`、`DML-01`、`DML-03` 和 `TXN-05` 保持部分实现。 [功能测试](test-report.md#view-check-option-20261126) · [性能报告](performance-report-2026-10-30.md#view-check-option-cost-20261126)
+对直接读取底表列的单层和多层普通视图，`INSERT` 和 `UPDATE` 检查经过表默认值、存储生成列和表约束处理后的新行。支持 `LOCAL`、`CASCADED` 以及 `44000` 错误语义，多行语句中有一行失败会撤销整条语句。分区表、通过视图触发器写入时的级联检查、`MERGE` 和 `ON CONFLICT` 仍有差距。`CAT-16`、`DML-01`、`DML-03` 和 `TXN-05` 保持部分实现。 [功能测试](test-report.md#view-check-option-20261126) · [性能报告](performance-report-2026-10-30.md#view-check-option-cost-20261126)
 
 ## 2026-11-26 · 给普通视图的列改名
 
@@ -24,7 +28,7 @@
 
 ## 2026-11-26 · 写入单表视图时找到原来的表列
 
-对受支持的单表视图，`INSERT`、`UPDATE` 和 `DELETE` 按视图原有的列名和列顺序定位表列，`UPDATE` 和 `DELETE` 应用视图的过滤条件。改表列名或调整同名表的查找顺序后，这些操作仍写入定义时选定的表列。嵌套视图、计算列、完整的 `CHECK OPTION` 和 `ON CONFLICT` 仍有差距。`CAT-16`、`DML-01` 和 `DML-03` 保持部分实现。 [功能测试](test-report.md#writable-view-projection-20261126) · [性能报告](performance-report-2026-10-30.md#writable-view-projection-cost-20261126)
+对受支持的单表视图，`INSERT`、`UPDATE` 和 `DELETE` 按视图原有的列名和列顺序定位表列，`UPDATE` 和 `DELETE` 应用视图的过滤条件。改表列名或调整同名表的查找顺序后，这些操作仍写入定义时选定的表列。`CAT-16`、`DML-01` 和 `DML-03` 保持部分实现。 [功能测试](test-report.md#writable-view-projection-20261126) · [性能报告](performance-report-2026-10-30.md#writable-view-projection-cost-20261126)
 
 ## 2026-11-26 · 表改列名后保留视图的星号输出和连接
 

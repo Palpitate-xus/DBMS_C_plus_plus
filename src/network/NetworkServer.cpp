@@ -4768,10 +4768,10 @@ bool describePreparedResultShape(const ProtocolQuerySyntax& syntax, Session& ses
                 return describePreparedResultShape(body, session, columns, types->second);
         }
     }
-    if (const auto* with = dynamic_cast<const WithStmt*>(syntax.parse().stmt.get());
-        with && view_write::targetsView(session, with->statement.get())) {
+    const auto describeViewWrite = [&] {
+        ProtocolSessionScope scope(session);
         const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql,
-            protocolMetadataParameters(session, parameterOids));
+            protocolMetadataParameters(session, parameterOids), true);
         QueryResult shape;
         for (const auto& field : prepared.output) {
             shape.columns.push_back(field.name);
@@ -4779,7 +4779,12 @@ bool describePreparedResultShape(const ProtocolQuerySyntax& syntax, Session& ses
         }
         columns = describeProtocolColumns(shape, sql, session, &prepared.output);
         return !columns.empty();
-    }
+    };
+    const auto* statement = syntax.parse().stmt.get();
+    const auto* rootSelect = dynamic_cast<const SelectStmt*>(statement);
+    if ((dynamic_cast<const WithStmt*>(statement) || (rootSelect && !rootSelect->ctes.empty())) &&
+        view_write::targetsView(session, statement))
+        return describeViewWrite();
     if (describeMaintenanceProgress(syntax, columns)) return true;
     if (describePreparedWindowHostResult(syntax,session,columns,parameterOids)) return true;
     if(describePreparedMultirowExpression(syntax,session,columns,parameterOids))return true;
@@ -4801,6 +4806,15 @@ bool describePreparedResultShape(const ProtocolQuerySyntax& syntax, Session& ses
     ParseResult parsed = parser.parse(sql);
     if (!parsed.isValid()) return false;
     if(describePreparedReturningDeclaration(sql,session,parsed.stmt.get(),columns,parameterOids))return true;
+    // The fast RETURNING binder excludes scalar subqueries. Describe view
+    // writes through the same full binder as execution when it cannot help.
+    const auto* insert = dynamic_cast<const InsertStmt*>(statement);
+    const auto* update = dynamic_cast<const UpdateStmt*>(statement);
+    const auto* remove = dynamic_cast<const DeleteStmt*>(statement);
+    if (((insert && !insert->returning.empty()) || (update && !update->returning.empty()) ||
+         (remove && !remove->returning.empty())) &&
+        view_write::targetsView(session, statement))
+        return describeViewWrite();
     if (const auto* shown = dynamic_cast<const SetStmt*>(parsed.stmt.get())) {
         const auto name = SQLParser::toLower(shown->name);
         if (shown->isShow && (name == "transaction_isolation" ||
