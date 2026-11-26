@@ -3027,7 +3027,7 @@ void visitPreparedProjectionOrigins(size_t width, const PreparedQuery& query,
     }
 }
 
-void retainPreparedWindowOrigins(std::vector<PgColumnDescription>& columns,
+void retainPreparedProjectionOrigins(std::vector<PgColumnDescription>& columns,
     const PreparedQuery& query, Session& session) {
     visitPreparedProjectionOrigins(columns.size(),query,session,[&](size_t i, uint32_t relation, uint16_t attribute) {
         columns[i].tableOid=relation;
@@ -3089,7 +3089,7 @@ bool describePreparedWindowHostResult(const ProtocolQuerySyntax& syntax, Session
         shape.columnTypes.push_back(field.type);
     }
     columns = describeProtocolColumns(shape, sql, session, &prepared.output);
-    retainPreparedWindowOrigins(columns, prepared, session);
+    retainPreparedProjectionOrigins(columns, prepared, session);
     return !columns.empty();
 }
 
@@ -4207,7 +4207,7 @@ bool describePreparedPgStatsCatalog(const ProtocolQuerySyntax& syntax,Session& s
     QueryResult shape;
     for(const auto& field:query.output) {shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
     columns=describeProtocolColumns(shape,sql,session,&query.output);
-    retainPreparedWindowOrigins(columns,query,session);
+    retainPreparedProjectionOrigins(columns,query,session);
     return !columns.empty();
 }
 
@@ -4229,7 +4229,7 @@ bool describePreparedPgSequenceCatalog(const ProtocolQuerySyntax& syntax,Session
     QueryResult shape;
     for(const auto& field:query.output) {shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
     columns=describeProtocolColumns(shape,sql,session,&query.output);
-    retainPreparedWindowOrigins(columns,query,session);
+    retainPreparedProjectionOrigins(columns,query,session);
     return !columns.empty();
 }
 
@@ -4265,7 +4265,7 @@ bool describePreparedOwnedCatalog(const ProtocolQuerySyntax& syntax,Session& ses
     QueryResult shape;
     for(const auto& field:query.output) {shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
     columns=describeProtocolColumns(shape,sql,session,&query.output);
-    retainPreparedWindowOrigins(columns,query,session);
+    retainPreparedProjectionOrigins(columns,query,session);
     return !columns.empty();
 }
 
@@ -4316,7 +4316,7 @@ bool describePreparedDerivedIntegerJoin(const ProtocolQuerySyntax& syntax, Sessi
         shape.columnTypes.push_back(field.type);
     }
     columns = describeProtocolColumns(shape, std::string{}, session, &query.output);
-    retainPreparedWindowOrigins(columns, query, session);
+    retainPreparedProjectionOrigins(columns, query, session);
     return !columns.empty();
 }
 
@@ -4709,7 +4709,7 @@ static PgColumnDescription sessionSettingProtocolColumn(const SessionSettingProj
     return column;
 }
 
-static bool protocolJoinsOrdinaryView(const SelectStmt& root, const Session& session) {
+static bool protocolUsesNestedOrdinaryView(const SelectStmt& root, const Session& session) {
     if (root.ctes.empty() && (!root.fromClause || root.fromClause->type == FromItem::Type::Table))
         return false;
     if (!QueryPlanner::supportsPreparedSourceSelectPlan(root)) return false;
@@ -4717,16 +4717,16 @@ static bool protocolJoinsOrdinaryView(const SelectStmt& root, const Session& ses
     const CatalogManager* catalog = nullptr;
     using Names = std::set<std::string>;
     std::function<bool(const SelectStmt&, Names)> query;
-    const std::function<bool(const FromItem*, const Names&, bool)> from =
-        [&](const FromItem* source, const Names& ctes, bool joined) {
+    const std::function<bool(const FromItem*, const Names&)> from =
+        [&](const FromItem* source, const Names& ctes) {
             if (!source) return false;
             if (source->type == FromItem::Type::Join)
-                return from(source->left.get(), ctes, true) || from(source->right.get(), ctes, true);
+                return from(source->left.get(), ctes) || from(source->right.get(), ctes);
             if (source->type == FromItem::Type::Subquery) {
                 const auto* subquery = dynamic_cast<const SelectStmt*>(source->subquery.get());
                 return subquery && query(*subquery, ctes);
             }
-            if (!joined || source->type != FromItem::Type::Table) return false;
+            if (source->type != FromItem::Type::Table) return false;
             CatalogManager::QualifiedName name;
             if (!CatalogManager::parseQualifiedName(source->tableName, name, true) ||
                 (name.schema.empty() && ctes.count(name.name))) return false;
@@ -4738,6 +4738,8 @@ static bool protocolJoinsOrdinaryView(const SelectStmt& root, const Session& ses
             return relation && relation->relkind == 'v' && relation->relnamespace != 11;
         };
     query = [&](const SelectStmt& select, Names ctes) {
+        // A view may be the only source of a read-only WITH definition or a
+        // derived SELECT. Its columns still reach the outer result descriptor.
         for (const auto& definition : select.ctes) {
             const auto* child = dynamic_cast<const SelectStmt*>(definition.query.get());
             CatalogManager::QualifiedName name;
@@ -4746,7 +4748,7 @@ static bool protocolJoinsOrdinaryView(const SelectStmt& root, const Session& ses
             if (query(*child, ctes)) return true;
             ctes.insert(std::move(name.name));
         }
-        return from(select.fromClause.get(), ctes, false);
+        return from(select.fromClause.get(), ctes);
     };
     return query(root, {});
 }
@@ -4769,7 +4771,7 @@ bool describePreparedResultShape(const ProtocolQuerySyntax& syntax, Session& ses
             if (view_write::targetsView(session, root) ||
                 (select && select->fromClause &&
                     (protocolPhysicalSourceFromQuery(body.sql(), session).logicalView ||
-                     protocolJoinsOrdinaryView(*select, session))))
+                     protocolUsesNestedOrdinaryView(*select, session))))
                 return describePreparedResultShape(body, session, columns, types->second);
         }
     }
@@ -4838,8 +4840,8 @@ bool describePreparedResultShape(const ProtocolQuerySyntax& syntax, Session& ses
     }
     const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
     const bool functionSource = hasTableFunctionSource(select);
-    if (select && (functionSource || protocolPhysicalSourceFromQuery(sql, session).logicalView ||
-                   protocolJoinsOrdinaryView(*select, session))) {
+    const bool nestedView = select && !functionSource && protocolUsesNestedOrdinaryView(*select, session);
+    if (select && (functionSource || nestedView || protocolPhysicalSourceFromQuery(sql, session).logicalView)) {
         auto* previous = currentSession();
         setCurrentSession(&session);
         struct Restore { Session* previous; ~Restore() { setCurrentSession(previous); } } restore{previous};
@@ -4851,7 +4853,7 @@ bool describePreparedResultShape(const ProtocolQuerySyntax& syntax, Session& ses
             shape.columnTypes.push_back(field.type);
         }
         columns = describeProtocolColumns(shape, sql, session, &prepared.output);
-        if (functionSource) retainPreparedWindowOrigins(columns, prepared, session);
+        if (functionSource || nestedView) retainPreparedProjectionOrigins(columns, prepared, session);
         return functionSource || !columns.empty();
     }
     if (select && !parameterOids.empty() &&

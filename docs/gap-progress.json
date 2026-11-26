@@ -3,13 +3,26 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 describe result columns of ordinary views read through CTEs and derived queries",
+      "gap_ids": ["QRY-12", "PROTO-03", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/indexed_view_reads_protocol_e2e_test.py"],
+      "verification": [
+        "Compare statement and portal descriptions against PostgreSQL 18.6, including view attribute origin, typmods, binary rows and empty results.",
+        "Check the sequence value before execution and compare psql descriptions with the previous build.",
+        "Check new descriptions against files from the previous build and after committed or uncommitted writes followed by process restart."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 stop retaining intermediate rows in forward-only view inputs",
       "gap_ids": ["CAT-16", "QRY-12", "OPT-16"],
       "status": "partial",
       "evidence": ["src/main.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
       "tests": ["tests/indexed_view_reads_protocol_e2e_test.py", "tests/compat/cases/view_read_and_empty_writes.sql"],
       "verification": [
-        "Compare view rows and protocol metadata against PostgreSQL 18.6, including a reused join input, a materialized CTE and volatile targets under LIMIT. The tested extended CTE self-join still lacks RowDescription.",
+        "Compare view rows and protocol metadata against PostgreSQL 18.6, including a reused join input, a materialized CTE and volatile targets under LIMIT. The tested extended CTE self-join lacked RowDescription in that build.",
         "Verify actual retained rows with EXPLAIN ANALYZE, plus crash recovery, snapshot visibility and existing view DML behavior.",
         "Compare latency and process memory with the previous build and a separate previous-build control."
       ]

@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 在扩展查询中报告多层视图的列说明
+
+受支持的非递归 `WITH` 和派生查询可以在执行前报告普通视图的列名、类型、长度限制和来源。验证覆盖返回零行、二进制结果和重复引用同一 `WITH`。`QRY-12`、`PROTO-03` 和 `PROTO-04` 保持部分实现。 [功能验证](test-report.md#nested-view-columns-20261126) · [性能报告](performance-report-2026-10-30.md#nested-view-column-cost-20261126)
+
 ## 2026-11-26 · 视图读取减少重复保留的行
 
 支持的只读视图计划逐行传递已绑定值，单向读取的数据源不再额外保留已处理的行。连接输入、复用的 `WITH`、排序及最终结果按原有需求保留数据。`CAT-16`、`QRY-12` 和 `OPT-16` 保持部分实现。 [功能测试](test-report.md#forward-view-inputs-20261126) · [性能报告](performance-report-2026-10-30.md#forward-view-input-cost-20261126)

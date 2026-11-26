@@ -298,7 +298,7 @@ def exercise_ranges(wire, peer, schema, reference):
     wire.command("ROLLBACK", "ROLLBACK")
 
 
-def exercise_reusable_view_inputs(wire, schema, reference):
+def exercise_reusable_view_inputs(wire, schema):
     view = f"{schema}.range_outer"
     labels = f"{schema}.labels"
     wire.command(f"CREATE TABLE {labels}(id int, tag text)", "CREATE TABLE")
@@ -309,9 +309,7 @@ def exercise_reusable_view_inputs(wire, schema, reference):
                      fields=[("tag", 25), ("number", 23)])
         reader.query(f"WITH pick AS MATERIALIZED (SELECT number FROM {view} WHERE number<=7) "
                      "SELECT a.number AS a,b.number AS b FROM pick a CROSS JOIN pick b WHERE a.number<b.number ORDER BY a,b",
-                     rows=[("3", "5"), ("3", "7"), ("5", "7")], tag="SELECT 3",
-                     # This shape already lacked an extended RowDescription.
-                     fields=[("a", 23), ("b", 23)] if reference or not reader.extended else None)
+                     rows=[("3", "5"), ("3", "7"), ("5", "7")], tag="SELECT 3", fields=[("a", 23), ("b", 23)])
 
     sequence, counted = f"{schema}.view_calls", f"{schema}.counted_v"
     wire.command(f"CREATE SEQUENCE {sequence} START WITH 100", "CREATE SEQUENCE")
@@ -321,11 +319,55 @@ def exercise_reusable_view_inputs(wire, schema, reference):
     wire.query(f"SELECT currval('{sequence}') AS n", rows=[("100",)], fields=[("n", 20)])
     wire.query(f"SELECT n FROM {counted} LIMIT 2", rows=[("101",), ("102",)], tag="SELECT 2", fields=[("n", 20)])
     wire.query(f"SELECT currval('{sequence}') AS n", rows=[("102",)], fields=[("n", 20)])
-    wire.query(f"WITH sampled AS MATERIALIZED (SELECT n FROM {counted} LIMIT 2) "
-               "SELECT a.n AS a,b.n AS b FROM sampled a CROSS JOIN sampled b ORDER BY a,b",
-               rows=[("103", "103"), ("103", "104"), ("104", "103"), ("104", "104")], tag="SELECT 4",
-               fields=[("a", 20), ("b", 20)])
+    oid, = map(int, wire.client.data_row_values(
+        wire.send_statements(f"SELECT '{counted}'::regclass::oid"))[0])
+    sampled = (f"WITH sampled AS MATERIALIZED (SELECT n FROM {counted} LIMIT 2) "
+               "SELECT a.n AS a,b.n AS b FROM sampled a CROSS JOIN sampled b ORDER BY a,b")
+    name = b"sampled_cte"
+    sync = wire.packet(b"S")
+    statement = wire.exchange(wire.parse(sampled, name) + wire.packet(b"D", b"S" + name + b"\0") + sync)
+    assert [kind for kind, _ in statement] == [b"1", b"t", b"T", b"Z"], statement
+    columns = [(key, oid, 1, 20, 8, -1, 0) for key in (b"a", b"b")]
+    assert wire.client.row_description_fields(statement) == columns
+    wire.query(f"SELECT currval('{sequence}') AS n", rows=[("102",)], fields=[("n", 20)])
+    reply = wire.exchange(wire.bind(name) + wire.describe_portal() + wire.execute() + sync)
+    assert wire.client.row_description_fields(reply) == columns
+    wire.check(sampled, reply, rows=[("103", "103"), ("103", "104"), ("104", "103"), ("104", "104")],
+               tag="SELECT 4", fields=[("a", 20), ("b", 20)])
     wire.query(f"SELECT currval('{sequence}') AS n", rows=[("104",)], fields=[("n", 20)])
+
+
+def exercise_view_column_descriptions(wire, schema):
+    view = f"{schema}.described_v"
+    wire.command(f"CREATE VIEW {view} AS SELECT number,note::varchar(12) AS label "
+                 f"FROM {schema}.range_outer WHERE number<=7", "CREATE VIEW")
+    oid, = map(int, wire.client.data_row_values(
+        wire.send_statements(f"SELECT '{view}'::regclass::oid"))[0])
+    number = (oid, 1, 23, 4, -1)
+    label = (oid, 2, 1043, -1, 16)
+    sync = wire.packet(b"S")
+    describe_statement = wire.packet(b"D", b"S\0")
+    cases = (
+        (f"WITH pick AS MATERIALIZED (SELECT * FROM {view}) "
+         "SELECT a.number AS a,b.number AS b FROM pick a CROSS JOIN pick b WHERE a.number<b.number ORDER BY a,b",
+         [(b"a", *number), (b"b", *number)], [(3, 5), (3, 7), (5, 7)]),
+        (f"SELECT d.label,d.number+1 AS computed FROM (SELECT * FROM {view}) AS d ORDER BY d.number",
+         [(b"label", *label), (b"computed", 0, 0, 23, 4, -1)], [("row-3", 4), ("row-5", 6), ("row-7", 8)]),
+        (f"WITH first_read AS (SELECT * FROM {view}), second_read(n,l) AS (SELECT * FROM first_read) "
+         "SELECT l,n FROM second_read WHERE false",
+         [(b"l", *label), (b"n", *number)], []),
+    )
+    for sql, fields, values in cases:
+        statement = wire.exchange(wire.parse(sql) + describe_statement + sync)
+        assert [kind for kind, _ in statement] == [b"1", b"t", b"T", b"Z"], (sql, statement)
+        assert wire.client.row_description_fields(statement) == [(*field, 0) for field in fields]
+        portal = wire.exchange(wire.bind(result_format=1) + wire.describe_portal() + wire.execute() + sync)
+        assert [kind for kind, _ in portal] == [b"2", b"T"] + [b"D"] * len(values) + [b"C", b"Z"], (sql, portal)
+        assert wire.client.row_description_fields(portal) == [(*field, 1) for field in fields]
+        expected = [[struct.pack("!i", cell) if isinstance(cell, int) else cell.encode()
+                     for cell in row] for row in values]
+        assert wire.client.data_row_values(portal) == expected, (sql, portal)
+        assert portal[-2:] == [(b"C", f"SELECT {len(values)}\0".encode()), (b"Z", b"I")], (sql, portal)
 
 
 def main():
@@ -353,7 +395,8 @@ def main():
             startup(peer, user, database, password)
             exercise(wire, Wire(client, peer), schema, reference)
             exercise_ranges(wire, Wire(client, peer), schema, reference)
-            exercise_reusable_view_inputs(wire, schema, reference)
+            exercise_reusable_view_inputs(wire, schema)
+            exercise_view_column_descriptions(wire, schema)
         print("[INDEXED VIEW READS] passed", flush=True)
     finally:
         if server:

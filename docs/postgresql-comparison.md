@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 执行前获取多层视图的列说明
+
+PostgreSQL 的扩展查询协议在 `Describe` 时返回列名、类型和来源等信息，即使随后查询结果为空。SQLite 可以在执行前从已准备的语句取得列名。DuckDB 的 C 接口也能从已准备的语句取得列名和逻辑类型。 [PostgreSQL 消息流程](https://www.postgresql.org/docs/18/protocol-flow.html) · [SQLite 列名接口](https://www.sqlite.org/c3ref/column_name.html) · [DuckDB 预编译语句接口](https://duckdb.org/docs/lts/clients/c/prepared)
+
+本项目在受支持的 `WITH` 和子查询读取普通视图时，用已绑定的结果列回复 `Describe`。直接引用的列保留来源视图和列号，测试中的计算列没有来源，列说明阶段不运行查询。 [测试报告](test-report.md#nested-view-columns-20261126)
+
 <a id="forward-view-inputs-comparison-20261126"></a>
 ## 2026-11-26 · 按需向上层视图交付记录
 

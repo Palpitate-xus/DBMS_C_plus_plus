@@ -6,6 +6,10 @@
 
 截至 2026-11-26，273 项功能要求中有 22 项完成、170 项部分实现、66 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-26 · 客户端能在执行前看到多层视图的列
+
+受支持的 `WITH` 和子查询读取普通视图时，客户端可在执行前得到列名、类型和来源信息。psql 18.6 的 `\gdesc` 可查看这些查询的列。 [测试报告](test-report.md#nested-view-columns-20261126)
+
 ## 2026-11-26 · 多层视图逐行传递数据
 
 受支持的只读视图查询省去数据源的重复行缓存。连接、排序和复用 `WITH` 查询时，由相应步骤保留自己的数据。可用 `retainedInputRows` 检查一个数据源保留了几行。 [测试报告](test-report.md#forward-view-inputs-20261126) · [性能报告](performance-report-2026-10-30.md#forward-view-input-cost-20261126)

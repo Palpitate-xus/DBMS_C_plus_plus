@@ -4,6 +4,33 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="nested-view-column-cost-20261126"></a>
+## 2026-11-26 · 多层视图的列说明耗时
+
+```sql
+CREATE TABLE shape_base(id int PRIMARY KEY, note text);
+INSERT INTO shape_base VALUES (3,'first'),(5,'second'),(7,NULL);
+CREATE VIEW shape_view AS SELECT id AS n,note::varchar(8) AS label FROM shape_base;
+
+WITH pick AS MATERIALIZED (SELECT n,label FROM shape_view)
+SELECT a.n AS a,b.n AS b,b.label FROM pick a CROSS JOIN pick b WHERE a.n<b.n ORDER BY a,b;
+
+SELECT n,label FROM shape_view WHERE n=3;
+```
+
+在同一台机器的 CPU 10 和 tmpfs 上运行四个独立进程，分别使用上一版 `fe0fbf55`、本次构建、同一上一版复测和 PostgreSQL 18.6。分别计时已经准备好的自连接语句的 `Describe`、从 `Parse` 到 `Sync` 的完整扩展查询，以及自连接的简单查询。直接查视图的一行作为扩展查询的对照。每轮轮换进程顺序，预热两次后记 21 次，共三轮和 1,008 个样本。用 GCC 13.3、C++17、`-O2` 构建，关闭 OpenSSL。
+
+每格给出三轮中位数的范围和最大单次耗时，单位为毫秒。星号标出上一版省略列说明的请求。
+
+| 操作 | 上一版 | 本次构建 | 上一版复测 | PostgreSQL 18.6 |
+| --- | ---: | ---: | ---: | ---: |
+| 仅查看自连接的列说明 | 0.461–0.472 / 0.560 * | 1.037–1.064 / 1.351 | 0.460–0.498 / 0.766 * | 0.081–0.087 / 0.133 |
+| 扩展协议执行自连接 | 6.401–6.514 / 7.056 * | 8.295–8.425 / 9.331 | 6.423–6.476 / 6.951 * | 0.289–0.296 / 0.469 |
+| 扩展协议直接查视图一行 | 5.752–5.921 / 6.243 | 5.809–5.880 / 6.407 | 5.724–5.859 / 6.643 | 0.213–0.226 / 0.370 |
+| 简单协议执行自连接 | 5.234–5.377 / 5.677 | 5.130–5.337 / 6.277 | 5.144–5.288 / 5.951 | 0.254–0.274 / 0.512 |
+
+上一版把查询标成无结果列。新版能返回完整列说明，扩展查询三轮中位数多花约 1.8–2.0 毫秒。直接查询和简单协议的两组中位数仍有重叠。 [正确性验证](test-report.md#nested-view-columns-20261126)
+
 <a id="forward-view-input-cost-20261126"></a>
 ## 2026-11-26 · 多层视图省去中间行的副本
 

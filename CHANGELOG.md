@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>客户端能显示报表的列名了</summary>
+
+用 psql 查看多层报表时，可以看到每列的名称和数据类型。即使没有符合条件的记录，也能查看列说明。
+
+2026-11-26 · [测试报告](docs/test-report.md#nested-view-columns-20261126) · [性能报告](docs/performance-report-2026-10-30.md#nested-view-column-cost-20261126)
+
+</details>
+
+<details>
 <summary>查多层报表时少占内存</summary>
 
 例如，一份订单报表来自另一份报表时，数据库可以逐条传递记录，省去在每一步留一份副本的开销。排序或多次使用同一批记录时，仍会保留需要的数据。
@@ -21,18 +30,15 @@
 </details>
 
 <details>
-<summary>按一小段订单号查报表更快了</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 按一小段订单号查报表更快了
 
 例如，查订单号 100 到 115 时，数据库可以先找到这批订单，再按报表上的条件筛选。
 
 也可以一次查两段分开的编号。查询涉及大量记录时，数据库仍可选择顺序读取原表。
 
-2026-11-26 · [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#view-primary-key-ranges-20261126) · [性能报告](docs/performance-report-2026-10-30.md#view-primary-key-range-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#view-primary-key-ranges-20261126) · [性能报告](docs/performance-report-2026-10-30.md#view-primary-key-range-cost-20261126)
 
 ## 2026-11-26 · 从多层报表按编号找记录更快了
 

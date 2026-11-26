@@ -2,12 +2,25 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="nested-view-columns-20261126"></a>
+## 2026-11-26 · 客户端获取多层视图的列说明
+
+上一版在五条受测的多层视图查询中发出 `NoData`，其中有重复使用同一个 `WITH`、把视图放进子查询、使用两级 `WITH` 改列名、查询明确返回零行以及视图带序列调用。用 PostgreSQL 18.6 对照，新版的 `Describe` 返回列名、类型、来源视图编号、列号和长度限制。来源编号按各自数据库的实际视图校验。计算列的来源编号为零。新增回归还核对整数和字符串的二进制字节、空结果、命令标签与消息顺序。 [协议回归](../tests/indexed_view_reads_protocol_e2e_test.py)
+
+仅发送 `Describe` 后，序列值仍为 102。执行查询时只取得 103 和 104，再用这两行完成自连接。实际 psql 18.6 的 `\gdesc` 在上一版报告没有结果列，新版显示两列 `integer` 和一列 `character varying(8)`。
+
+16 个协议测试入口通过。另有两组既有差异，派生 `WITH` 的 139 项有 96 项与参考预期不同，窗口 `WITH` 的 747 项有 29 项不同。逐条比较两版记录，两组各自的全部结果相同。相邻视图功能的 756 条结果有 754 条与 PostgreSQL 一致，另外两条仍是既有的 `SET search_path TO public` 参数状态消息差异。 [派生 WITH 测试](../tests/derived_with_dispatch_protocol_e2e_test.py) · [窗口 WITH 测试](../tests/cte_window_owner_protocol_e2e_test.py)
+
+ext4 和 tmpfs 各检查了上一版数据文件、已提交更新和未提交更新三种强制终止与重启场景。重启后同时核对列的来源和类型、查询结果和提交可见性。实际断电待验证。
+
+本次构建的 SHA-256 为 `c495a25a0804472b227c6fdc7b20bd3ffae9e5d5a84c20a1b4c94975eca32370`。 [性能报告](performance-report-2026-10-30.md#nested-view-column-cost-20261126)
+
 <a id="forward-view-inputs-20261126"></a>
 ## 2026-11-26 · 多层视图读过的行直接交给上一层
 
 用涉及计算的筛选条件触发表扫描，确认底表扫描了全部 3,072 行。执行计划中的三个 `View Scan` 和已经打开的下层数据源都报告 `retainedInputRows=0`。左连接仍可用同一条右侧记录匹配两条左侧记录，无匹配时补 NULL。用 `WITH ... AS MATERIALIZED` 将同一组结果用两次，验证结果和命令标签；简单协议另核对列名与类型。 [协议回归](../tests/indexed_view_reads_protocol_e2e_test.py)
 
-带序列调用的视图在 `LIMIT 0` 时不取新值，在 `LIMIT 2` 时取两个值。把一次取出的两条记录通过 `WITH` 保存并在连接两侧使用时，序列只推进两次。用 PostgreSQL 18.6 跑过这组用例。测试中的扩展协议 `WITH` 自连接在本项目两版都会返回正确的行和标签，但缺少 PostgreSQL 返回的列说明。
+带序列调用的视图在 `LIMIT 0` 时不取新值，在 `LIMIT 2` 时取两个值。把一次取出的两条记录通过 `WITH` 保存并在连接两侧使用时，序列只推进两次。用 PostgreSQL 18.6 跑过这组用例。当时测到扩展协议的 `WITH` 自连接缺少列说明，已在后续构建修复。 [后续验证](#nested-view-columns-20261126)
 
 另外对照了 56 条范围查询，两版均与 PostgreSQL 18.6 一致。比较完整行值、列名、类型、命令标签和协议消息顺序。相邻视图功能的 756 条协议结果有 754 条一致，余下两条是既有的 `SET search_path TO public` 参数状态消息差异。12 个协议入口和 5 个 C++ 入口通过。
 

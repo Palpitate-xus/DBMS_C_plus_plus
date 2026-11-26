@@ -2322,6 +2322,8 @@ SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
 
 直接查询受支持的普通视图，包括逐层读取其他视图的定义，可以使用保存的查询直接返回行。列名、空值和数组类型会保留。例子是 `SELECT amount FROM order_prices WHERE id = 10`。部分复杂定义仍使用原来的执行方式。 [测试与范围](test-report.md#view-read-and-empty-writes-20261126)
 
+受支持的非递归 `WITH` 和子查询读取普通视图时，psql 可以用 `\gdesc` 查看结果的列名和类型。输入查询后，用 `\gdesc` 代替直接执行，查询中的序列调用不会因此取新值。 [协议验证](test-report.md#nested-view-columns-20261126)
+
 受支持的只读视图查询会逐行把数据交给上一层。需要排序、连接或反复使用同一个 `WITH` 时，相关步骤仍会保存需要的行。`EXPLAIN ANALYZE` 的 `retainedInputRows` 显示对应的数据源额外保留了几行，排序和 `WITH` 的工作区由各自的步骤管理。 [验证范围](test-report.md#forward-view-inputs-20261126)
 
 用 `SELECT qty FROM active_orders WHERE order_number = 10` 查询时，如果 `order_number` 直接对应底表的单列整数主键，且每层视图都只是选列和做受支持的简单筛选，数据库可以从底表索引找到这笔订单，再检查它是否符合各层视图的条件。给主键列取别名也可以使用这条路径。用 `EXPLAIN (ANALYZE, FORMAT JSON)` 查看读取步骤和底表取行数。 [验证范围](test-report.md#indexed-view-reads-20261126)
