@@ -1,4 +1,5 @@
 #include "ExprEvaluator.h"
+#include "commands/DdlTransaction.h"
 #include "expression/IdentityValue.h"
 #include "ArrayDatumInput.h"
 #include "expression/CompoundValueOps.h"
@@ -7647,7 +7648,7 @@ ExprValue ExprEvaluator::evalSqlValue(const FunctionCallExpr* e,const RowContext
             throw DbError("42804","SQL value context changed its declared type");
         return *supplied;
     }
-    const auto* session=currentSession();
+    auto* session=currentSession();
     const auto nameValue=[](const std::string& name) { return ExprValue("name",name,name.empty()); };
     switch(kind) {
     case sql_value_detail::Kind::CurrentUser:
@@ -7662,16 +7663,37 @@ ExprValue ExprEvaluator::evalSqlValue(const FunctionCallExpr* e,const RowContext
         if(!session || !parseSessionSearchPath(session->searchPath,path,canonical))path={"public"};
         auto* engine=sqlValueEngine_?sqlValueEngine_:&g_engine;
         const auto database=currentDB_.empty() && session?session->currentDB:currentDB_;
-        const auto metadata=database.empty()?CatalogManager::MetadataSnapshot{}:
-            engine->catalogService().metadataSnapshot(database);
+        std::optional<std::vector<PgNamespaceRow>> namespaces;
         for(const auto& entry:path) {
             auto name=expandSessionSearchPathEntry(entry,session?session->username:std::string{});
             if(name=="pg_temp") {
-                name=activeTemporarySchema(session);
-                if(name.empty())continue;
+                if (!session || database.empty() || session->currentDB != database) continue;
+                if (!session->tempNamespaceCreated) {
+                    // A leading pg_temp is the default creation namespace.
+                    // Keep initialization within the caller's transaction so
+                    // a failed SELECT or ROLLBACK TO also undoes this change.
+                    DdlTransaction transaction(*engine, database, session);
+                    if (!transaction.enableSnapshotRollback() || !transaction.begin())
+                        throw DbError("58030", "could not start temporary schema initialization");
+                    auto& catalog = engine->catalogService().get(database);
+                    if (!catalog.getTempNamespace(session->pid)) {
+                        transaction.markSnapshotDirty();
+                        if (!catalog.createTempNamespace(session->pid) || !catalog.persistAll())
+                            throw DbError("58030", "could not publish temporary schema");
+                    }
+                    engine->noteTemporaryObjectAccess(database);
+                    if (!transaction.commit())
+                        throw DbError("58030", "could not commit temporary schema initialization");
+                    session->tempNamespaceCreated = true;
+                }
+                return nameValue(sessionTempSchemaName(*session));
             }
             if(name=="pg_catalog")return nameValue(name);
-            const bool present=std::any_of(metadata.namespaces.begin(),metadata.namespaces.end(),
+            if (!namespaces) {
+                namespaces = database.empty() ? std::vector<PgNamespaceRow>{}
+                    : engine->catalogService().namespaceSnapshot(database);
+            }
+            const bool present=std::any_of(namespaces->begin(),namespaces->end(),
                 [&](const auto& ns){return ns.nspname==name;});
             const bool stored=!name.empty() && name.size()<MAX_TABLE_NAME_LEN && name!="." && name!=".." &&
                 name.find('/')==std::string::npos && name.find('\\')==std::string::npos && name.find('\0')==std::string::npos;

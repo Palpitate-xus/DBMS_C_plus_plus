@@ -1055,6 +1055,8 @@ CREATE TABLE t (ID INT) WITH (FILLFACTOR = 90);
 
 `pg_temp` 指向当前连接的临时模式。第一次创建临时对象并生效前，查询 `'pg_temp.orders'::text::regclass` 会返回 `3F000`。临时模式已有时，找不到表会返回 `42P01`，包括删掉最后一张临时表之后。撤销首次创建会让临时模式重新变成不可用。 [临时模式测试](test-report.md#lazy-temp-namespace-20261126)
 
+执行 `SET search_path = pg_temp, public` 后，`SELECT current_schema` 会按需创建当前连接的临时模式并返回名称。把 `public` 放在前面时，查询返回 `public`。回滚首次初始化的事务会撤销这次创建。 [当前模式测试](test-report.md#current-schema-temp-20261126)
+
 ### 修改表
 
 用 `ALTER TABLE ... RENAME COLUMN` 改列名时，已有的检查约束和生成列表达式会使用新列名。比如把 `"数量"` 改成 `"订购数量"` 后，正数检查和用数量计算的列仍会生效。双引号保留大小写，`"D"` 和 `d` 可以是不同的列。[改名和回滚测试](test-report.md#rename-quoted-column-references-20261122)

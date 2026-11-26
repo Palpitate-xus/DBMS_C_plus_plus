@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以查到当前连接的临时模式名 · 2026-11-26</summary>
+
+把 `pg_temp` 放在查找顺序的最前面后，运行 `SELECT current_schema` 会返回这个连接自己的临时模式名。
+
+[使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#current-schema-temp-20261126) · [性能报告](docs/performance-report-2026-10-30.md#current-schema-temp-cost-20261126)
+
+</details>
+
+<details>
 <summary>查找不存在的临时表时，错误提示更准确 · 2026-11-26</summary>
 
 查临时表的编号时，报错会区分当前连接还没创建过临时表或序列，还是已经创建过但找不到指定的表。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>应用传入表名时，查看列信息更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 应用传入表名时，查看列信息更快
 
 应用把表名作为参数传给查询时，可以更快拿到列名和类型。在另外建了 128 张表的测试库里，列出目标表的四列用时从约 320 毫秒降到约 17 毫秒。
 
 [使用说明](docs/MANUAL.md#查询列的类型) · [测试报告](docs/test-report.md#catalog-runtime-key-20261126) · [性能报告](docs/performance-report-2026-10-30.md#catalog-runtime-key-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 可以用保存的表名查表编号
 

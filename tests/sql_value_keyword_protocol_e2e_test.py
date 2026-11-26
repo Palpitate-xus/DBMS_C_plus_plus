@@ -4,6 +4,65 @@ import socket
 import struct
 import sys
 from pathlib import Path
+from session_setting_functions_protocol_e2e_test import Wire
+
+
+def check_temporary_schema(client, sock):
+    wire = Wire(client, sock)
+    missing = "SELECT 'pg_temp.no_such_table'::text::regclass"
+    wire.command("SET search_path=public,pg_temp", "SET")
+    wire.query("SELECT current_schema AS n", rows=[("public",)], fields=[("n", 19)])
+    wire.query(missing, state="3F000", tag=None)
+    wire.command("CREATE TABLE public.current_schema_error_probe(i integer)", "CREATE TABLE")
+    wire.command("INSERT INTO public.current_schema_error_probe VALUES(0)", "INSERT 0 1")
+    try:
+        wire.command("SET search_path=missing_schema,pg_temp,public", "SET")
+        sql = "SELECT current_schema AS n"
+        sync = wire.packet(b"S")
+        frames = wire.exchange(wire.parse(sql) + wire.packet(b"D", b"S\0") + sync)
+        assert b"".join(kind for kind, _ in frames) == b"1tTZ", frames
+        assert [field[3] for field in client.row_description_fields(frames)] == [19], frames
+        wire.query(missing, state="3F000", tag=None)
+        wire.query("SELECT CASE WHEN false THEN current_schema ELSE 'kept'::name END AS n",
+                   rows=[("kept",)], fields=[("n", 19)])
+        wire.query(missing, state="3F000", tag=None)
+        wire.query("SELECT CASE WHEN current_schema::text LIKE 'pg_temp_%' THEN 1/i ELSE i END "
+                   "FROM public.current_schema_error_probe",
+                   state="22012", tag=None)
+        wire.query(missing, state="3F000", tag=None)
+
+        def initialize(mode, spelling, ready=b"I"):
+            sql = f"SELECT {spelling} AS n"
+            frames = mode.send_statements(sql)
+            rows = client.data_row_values(frames)
+            assert len(rows) == 1 and rows[0][0], (sql, frames)
+            value = rows[0][0].decode()
+            assert value.startswith("pg_temp_"), (sql, value)
+            mode.check(sql, frames, rows=[(value,)], fields=[("n", 19)], ready=ready)
+            mode.query(f"SELECT nspname FROM pg_namespace WHERE nspname='{value}'",
+                       rows=[(value,)], fields=[("nspname", 19)], ready=ready)
+
+        wire.command("BEGIN READ ONLY", "BEGIN", ready=b"T")
+        initialize(wire, "current_schema", ready=b"T")
+        wire.command("ROLLBACK", "ROLLBACK")
+        wire.query(missing, state="3F000", tag=None)
+        wire.command("BEGIN", "BEGIN", ready=b"T")
+        wire.command("SAVEPOINT before_temp", "SAVEPOINT", ready=b"T")
+        extended = Wire(client, sock, extended=True)
+        initialize(extended, "current_schema()", ready=b"T")
+        wire.command("ROLLBACK TO before_temp", "ROLLBACK", ready=b"T")
+        wire.query(missing, state="3F000", tag=None, ready=b"E")
+        wire.command("ROLLBACK", "ROLLBACK")
+        wire.query(missing, state="3F000", tag=None)
+        initialize(extended, "pg_catalog.current_schema()")
+        wire.command("DISCARD TEMP", "DISCARD TEMP")
+        wire.query(missing, state="42P01", tag=None)
+    except Exception:
+        wire.send_statements("ROLLBACK")
+        wire.send_statements("DROP TABLE public.current_schema_error_probe")
+        raise
+    else:
+        wire.command("DROP TABLE public.current_schema_error_probe", "DROP TABLE")
 
 
 def main():
@@ -87,6 +146,7 @@ def main():
         result=check('CREATE FUNCTION sql_value_keyword_text_schema() RETURNS TEXT LANGUAGE sql AS $$ SELECT current_schema $$')
         if result[1] is None:created.append('sql_value_keyword_text_schema')
         check('SELECT sql_value_keyword_text_schema()',[["public"]],[25])
+        check_temporary_schema(client, sock)
         print('SQL_VALUE_KEYWORD_COMPLETE',checked,'FAILED',len(failures),failures,flush=True)
         assert not failures,failures
     finally:
