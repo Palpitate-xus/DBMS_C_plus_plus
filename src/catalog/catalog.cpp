@@ -686,6 +686,59 @@ std::optional<PgClassRow> CatalogManager::resolveRelationSnapshot(
     return row ? std::make_optional(*row) : std::nullopt;
 }
 
+std::optional<CatalogManager::RelationReference> CatalogManager::relationReference(
+    std::optional<Oid> oid, const QualifiedName& name, const std::vector<std::string>& searchPath) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Native catalogs and older images can contain repeated names or OIDs.
+    // Keep the original first-match order in those images.
+    const bool uniqueNames = nsByName_.size() == namespaces_.size() && classByName_.size() == classes_.size();
+    const auto inSchema = [&](const std::string& relation, const std::string& schema) -> const PgClassRow* {
+        if (uniqueNames) return relationInSchemaUnlocked(relation, schema);
+        const auto space = std::find_if(namespaces_.begin(), namespaces_.end(),
+            [&](const PgNamespaceRow& row) { return row.nspname == schema; });
+        if (space == namespaces_.end()) return nullptr;
+        const auto found = std::find_if(classes_.begin(), classes_.end(),
+            [&](const PgClassRow& row) { return row.relnamespace == space->oid && row.relname == relation; });
+        return found == classes_.end() ? nullptr : &*found;
+    };
+    const auto visible = [&](const std::string& relation) -> const PgClassRow* {
+        if (uniqueNames) return visibleRelationUnlocked(relation, searchPath);
+        for (const auto& schema : searchPath)
+            if (const auto* row = inSchema(relation, schema)) return row;
+        return nullptr;
+    };
+    if (!oid) {
+        const auto* row = name.schema.empty() ? visible(name.name) : inSchema(name.name, name.schema);
+        if (!row) return std::nullopt;
+        oid = row->oid;
+    }
+    if (!*oid) return RelationReference{*oid, {}, {}};
+    const auto* relation = findClassUnlocked(*oid);
+    if (classByOid_.size() != classes_.size()) {
+        const auto first = std::find_if(classes_.begin(), classes_.end(),
+            [&](const PgClassRow& row) { return row.oid == *oid; });
+        relation = first == classes_.end() ? nullptr : &*first;
+    }
+    if (!relation) return std::nullopt;
+    if (const auto* row = visible(relation->relname); row && row->oid == *oid)
+        return RelationReference{*oid, relation->relname, {}};
+    const auto* space = findNamespaceUnlocked(relation->relnamespace);
+    if (nsByOid_.size() != namespaces_.size()) {
+        const auto first = std::find_if(namespaces_.begin(), namespaces_.end(),
+            [&](const PgNamespaceRow& row) { return row.oid == relation->relnamespace; });
+        space = first == namespaces_.end() ? nullptr : &*first;
+    }
+    if (!space) throw DbError("XX001", "relation reference has no namespace metadata");
+    return RelationReference{*oid, relation->relname, space->nspname};
+}
+
+std::optional<CatalogManager::RelationReference> CatalogManager::readRelationReference(
+    const std::string& path, std::optional<Oid> oid, const QualifiedName& name,
+    const std::vector<std::string>& searchPath) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.relationReference(oid, name, searchPath);
+}
+
 std::optional<bool> CatalogManager::relationIsVisible(
     Oid oid, const std::vector<std::string>& searchPath) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1153,30 +1206,24 @@ const PgClassRow* CatalogManager::resolveRelationUnlocked(
     QualifiedName qn;
     if (!parseQualifiedName(name, qn)) return nullptr;
 
-    if (!qn.schema.empty()) {
-        auto nsIt = nsByName_.find(qn.schema);
-        if (nsIt == nsByName_.end()) return nullptr;
-        auto it = classByName_.find(classNameKey(nsIt->second, qn.name));
-        if (it != classByName_.end() && it->second < classes_.size()) {
-            return &classes_[it->second];
-        }
-        return nullptr;
-    }
-
-    return visibleRelationUnlocked(qn.name, searchPath);
+    return qn.schema.empty() ? visibleRelationUnlocked(qn.name, searchPath)
+                             : relationInSchemaUnlocked(qn.name, qn.schema);
 }
 
 const PgClassRow* CatalogManager::visibleRelationUnlocked(
     const std::string& name, const std::vector<std::string>& searchPath) const {
-    for (const auto& nspname : searchPath) {
-        auto nsIt = nsByName_.find(nspname);
-        if (nsIt == nsByName_.end()) continue;
-        auto it = classByName_.find(classNameKey(nsIt->second, name));
-        if (it != classByName_.end() && it->second < classes_.size()) {
-            return &classes_[it->second];
-        }
-    }
+    for (const auto& schema : searchPath)
+        if (const auto* row = relationInSchemaUnlocked(name, schema)) return row;
     return nullptr;
+}
+
+const PgClassRow* CatalogManager::relationInSchemaUnlocked(
+    const std::string& name, const std::string& schema) const {
+    const auto space = nsByName_.find(schema);
+    if (space == nsByName_.end()) return nullptr;
+    const auto relation = classByName_.find(classNameKey(space->second, name));
+    if (relation == classByName_.end() || relation->second >= classes_.size()) return nullptr;
+    return &classes_[relation->second];
 }
 
 const PgAttributeRow* CatalogManager::resolveAttribute(

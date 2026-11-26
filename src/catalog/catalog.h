@@ -121,6 +121,17 @@ public:
                                            const std::vector<std::string>& searchPath) const;
     std::optional<PgClassRow> resolveRelationSnapshot(
         const std::string& name, const std::vector<std::string>& searchPath) const;
+    struct RelationReference {
+        Oid oid;
+        std::string name;
+        std::optional<std::string> schema;
+    };
+    // Resolve input and determine how to display the result in one generation.
+    // An engaged OID takes precedence over the parsed name.
+    std::optional<RelationReference> relationReference(std::optional<Oid> oid,
+        const QualifiedName& name, const std::vector<std::string>& searchPath) const;
+    static std::optional<RelationReference> readRelationReference(const std::string& path,
+        std::optional<Oid> oid, const QualifiedName& name, const std::vector<std::string>& searchPath);
     std::optional<PgAttributeRow> resolveAttributeSnapshot(
         const std::string& tableName, const std::string& colName,
         const std::vector<std::string>& searchPath) const;
@@ -432,6 +443,8 @@ private:
         const std::string& name, const std::vector<std::string>& searchPath) const;
     const PgClassRow* visibleRelationUnlocked(
         const std::string& name, const std::vector<std::string>& searchPath) const;
+    const PgClassRow* relationInSchemaUnlocked(
+        const std::string& name, const std::string& schema) const;
     const PgClassRow*     findClassUnlocked(Oid oid) const;
     const PgTypeRow*      findTypeUnlocked(Oid oid) const;
     const PgProcRow*      findProcUnlocked(Oid oid) const;

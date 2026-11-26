@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-26 look up relation names from runtime strings",
+      "gap_ids": ["CAT-03", "QRY-01", "CLIENT-01"],
+      "status": "partial",
+      "evidence": ["src/catalog/CatalogService.cpp", "src/catalog/catalog.cpp", "src/expression/ExprEvaluator.cpp", "src/main.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/format_type_protocol_e2e_test.py", "tests/regclass_value_test.cpp"],
+      "verification": [
+        "Resolve typed text and varchar as names, including names composed solely of digits, and retain the standard untyped reference input.",
+        "Resolve and display a relation from one catalog generation and reuse the OID carried by an existing datum for numeric conversion.",
+        "Compare simple, extended and binary result protocols against PostgreSQL 18.6, including parameter input, rollback of a rename, and recovery of old data."
+      ]
+    },
+    {
       "issue": "2026-11-26 reuse validated literal regclass identities in OID equality",
       "gap_ids": ["CAT-03", "QRY-01", "CLIENT-01"],
       "status": "partial",

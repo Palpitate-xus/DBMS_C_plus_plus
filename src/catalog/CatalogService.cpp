@@ -823,6 +823,39 @@ CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::str
     return CatalogManager::readMetadataSnapshot(catalog.path, includeDefaultObjects);
 }
 
+std::pair<Oid, std::string> CatalogService::resolveRegclass(const std::string& database,
+    std::optional<Oid> oid, const std::string& input, const Session* session) const {
+    const auto ownership = database.empty() ? StorageEngine::CatalogReadOwnership{}
+                                            : engine_.catalogReadOwnership(database);
+    const auto catalog = database.empty() ? ReadCatalog{} : readCatalog(database, ownership.mayReadCurrentFiles);
+    CatalogManager::QualifiedName name;
+    auto namespacePath = freezeDeclaredTypeNamespace(session);
+    for (auto& schema : namespacePath.schemas)
+        if (schema == "pg_temp") schema = namespacePath.temporarySchema;
+    if (!oid) {
+        name = regclass_detail::parseName(input);
+        if (name.schema == "pg_temp") {
+            // A standalone native caller has no temporary namespace.
+            if (namespacePath.temporarySchema.empty())
+                throw DbError("42P01", "relation \"" + input + "\" does not exist");
+            name.schema = namespacePath.temporarySchema;
+        }
+    }
+    const auto relation = catalog.manager ? catalog.manager->relationReference(oid, name, namespacePath.schemas)
+        : catalog.path.empty() ? std::nullopt
+                              : CatalogManager::readRelationReference(catalog.path, oid, name, namespacePath.schemas);
+    if (relation && relation->oid) {
+        auto display = SQLParser::quoteIdentifier(relation->name);
+        if (relation->schema) display = SQLParser::quoteIdentifier(*relation->schema) + "." + display;
+        return {relation->oid, std::move(display)};
+    }
+    if (oid || relation) {
+        const Oid id = oid.value_or(INVALID_OID);
+        return {id, id ? std::to_string(id) : "-"};
+    }
+    throw DbError("42P01", "relation \"" + input + "\" does not exist");
+}
+
 CatalogManager::ConstraintIdentities CatalogService::constraintIdentities(const std::string& database,
     std::optional<Oid> owner, std::optional<Oid> referenced, std::optional<Oid> constraint) const {
     const auto catalog = readCatalog(database);

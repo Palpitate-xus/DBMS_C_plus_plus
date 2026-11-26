@@ -2840,6 +2840,17 @@ ORDER BY a.attnum;
 
 `format_type` 根据类型编号和列中保存的长度或精度生成类型名。也可以传入 `NULL` 作为第二个参数，只查看该类型的名称。类型被搜索路径中的同名类型挡住时，返回的名称会带上所属模式。 [验证记录](test-report.md#format-type-20261124)
 
+### 从文本列查找表的编号
+
+假设 `tracked_tables` 的文本列 `table_name` 保存了表名。下面的查询会返回表名和编号。
+
+```sql
+SELECT table_name, table_name::pg_catalog.regclass::oid AS table_number
+FROM tracked_tables;
+```
+
+如果有同名表，可以在数据里写完整的名称，例如 `public.orders`。文本 `007` 会查找名为 `"007"` 的表。想直接使用表编号 7 时，可写 `7::pg_catalog.regclass`。 [验证记录](test-report.md#regclass-runtime-20261126)
+
 ### 查询列的默认值
 
 以下查询按列号显示 `public.orders` 已登记的默认值。受支持的值包括常见的整数、布尔值、文本和对象编号。显示默认值时不会执行表达式。

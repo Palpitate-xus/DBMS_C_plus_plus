@@ -5830,23 +5830,32 @@ ExprValue ExprEvaluator::castReferenceValue(const ExprValue& v,
         regtype_detail::validateCast(sourceType,target);
         if(v.isNull)return ExprValue(target,"",true);
         const auto* session=currentSession();
-        const auto catalog=regtype_detail::metadata(engine,database);
         const auto source=common_type_detail::canonical(sourceType);
-        Oid oid=0;
-        if(regtype_cast_detail::reference(source) && v.objectOid)oid=*v.objectOid;
-        else if (isIntegerTypeName(source)) oid = integerObjectId(v, source);
-        else if(common_type_detail::oidType(source) && !regtype_cast_detail::reference(source)) {
+        std::optional<Oid> oid;
+        if(regtype_cast_detail::reference(source))oid=v.objectOid;
+        else if(isIntegerTypeName(source))oid=integerObjectId(v,source);
+        else if(common_type_detail::oidType(source)) {
             oid=v.objectOid?*v.objectOid:regtype_detail::numericOid(v.value);
-        } else oid=stored_regtype_detail::inputOid(v.value,catalog,session,target);
-        ExprValue result(target,stored_regtype_detail::outputOid(oid,catalog,session,target),false);
+        }
+        if(target=="regclass") {
+            // SQL text and varchar conversions look up names, even names
+            // spelled entirely with digits. Untyped input can carry an OID.
+            if(!oid && source!="text" && source!="varchar")oid=regclass_detail::literalOid(v.value);
+            auto reference=engine.catalogService().resolveRegclass(database,oid,v.value,session);
+            ExprValue result(target,std::move(reference.second),false);
+            result.objectOid=reference.first;
+            return result;
+        }
+        const auto catalog=regtype_detail::metadata(engine,database);
+        if(!oid)oid=regtype_detail::inputOid(v.value,catalog,session);
+        ExprValue result(target,regtype_detail::output(*oid,catalog,session),false);
         result.objectOid=oid;return result;
     }
     if(regtype_cast_detail::reference(sourceType) &&
        (target=="oid" || target=="integer" || target=="smallint" || target=="bigint")) {
         if(v.isNull)return ExprValue(target,"",true);
-        const auto* session=currentSession();
-        const auto catalog=regtype_detail::metadata(engine,database);
-        const Oid oid=v.objectOid?*v.objectOid:stored_regtype_detail::inputOid(v.value,catalog,session,sourceType);
+        const Oid oid=v.objectOid?*v.objectOid:stored_regtype_detail::inputOid(
+            v.value,regtype_detail::metadata(engine,database),currentSession(),sourceType);
         if(target=="oid"){ExprValue result("oid",std::to_string(oid));result.objectOid=oid;return result;}
         if(target=="integer") {
             const int64_t number=oid>std::numeric_limits<int32_t>::max()?static_cast<int64_t>(oid)-(int64_t{1}<<32):oid;
@@ -5988,7 +5997,7 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
     // untyped SQL leaf (or an explicitly UNKNOWN native datum) owns contextual
     // interval input; typed/planned values must keep their declared role.
     const auto* inputLiteral = dynamic_cast<const LiteralExpr*>(inputExpression);
-    const bool contextualIntervalInput = sourceType == "unknown" ||
+    const bool contextualStringInput = sourceType == "unknown" ||
         (inputLiteral && !inputLiteral->preparedSubquery &&
          inputLiteral->typeName.empty() && !inputLiteral->analyzedPrimitiveConstant &&
          isQuotedString(inputLiteral->value));
@@ -6046,7 +6055,8 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
        (target=="oid" || target=="integer" || target=="smallint" || target=="bigint"))) {
         const auto* session=currentSession();
         const auto database=currentDB_.empty() && session?session->currentDB:currentDB_;
-        return castReferenceValue(v,sourceType,target,sqlValueEngine_?*sqlValueEngine_:g_engine,database);
+        return castReferenceValue(v,target=="regclass" && contextualStringInput ? "unknown" : sourceType,
+            target,sqlValueEngine_?*sqlValueEngine_:g_engine,database);
     }
     regtype_cast_detail::validate(sourceType,target);
     if (target=="\"char\"") {
@@ -6105,7 +6115,7 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
         auto input = v.value;
         // An unadorned numeric input denotes the least-significant field
         // selected by the genuine declaration, not always seconds.
-        if (contextualIntervalInput && isNumericLiteral(trimStr(input)) &&
+        if (contextualStringInput && isNumericLiteral(trimStr(input)) &&
             spec.range != interval_type_detail::fullRange) {
             const char* unit = spec.range & interval_type_detail::second ? "seconds" :
                 spec.range & interval_type_detail::minute ? "minutes" :

@@ -84,6 +84,70 @@ def check_prepared_regclass(wire, is_postgres):
     assert b"".join(kind for kind, _ in frames) == b"3Z", frames
 
 
+def check_runtime_regclass(wire):
+    wire.command('CREATE TABLE format_a."Case.Table"(id integer)', "CREATE TABLE")
+    wire.command('CREATE TABLE format_a."007"(id integer)', "CREATE TABLE")
+    wire.command("CREATE TABLE format_a.relation_input(id integer PRIMARY KEY, relation_name text)",
+                 "CREATE TABLE")
+    wire.command("""INSERT INTO format_a.relation_input VALUES
+        (1,'path_probe'),(2,'format_a.path_probe'),(3,' format_a . "Case.Table" '),
+        (4,'pg_temp.format_temp_probe'),(5,'007'),(6,NULL)""", "INSERT 0 6")
+
+    def oid(name):
+        frames = wire.send_statements(f"SELECT '{name}'::pg_catalog.regclass::oid")
+        return wire.client.data_row_values(frames)[0][0].decode()
+
+    first = oid("format_a.path_probe")
+    second = oid("format_b.path_probe")
+    mixed = oid('format_a."Case.Table"')
+    numeric_name = oid('format_a."007"')
+    temporary = oid("pg_temp.format_temp_probe")
+    projection = (
+        "SELECT relation_name::pg_catalog.regclass AS relation, "
+        "relation_name::pg_catalog.regclass::oid AS number FROM format_a.relation_input"
+    )
+    fields = [("relation", 2205), ("number", 26)]
+    remaining = [('"Case.Table"', mixed), ("format_temp_probe", temporary),
+                 ('"007"', numeric_name), (None, None)]
+    wire.command("SET search_path=pg_catalog,format_b,format_a,public", "SET")
+    for extended in (False, True):
+        mode = Wire(wire.client, wire.sock, extended)
+        for type_name in ("regclass", "pg_catalog.regclass", '"pg_catalog"."regclass"'):
+            mode.query(projection.replace("pg_catalog.regclass", type_name) + " ORDER BY id",
+                       rows=[("path_probe", second), ("format_a.path_probe", first), *remaining],
+                       fields=fields, tag="SELECT 6")
+    frames = wire.exchange(wire.parse(projection + " WHERE id=5") + wire.bind(result_format=1) +
+                           wire.describe_portal() + wire.execute() + wire.packet(b"S"))
+    assert b"".join(kind for kind, _ in frames) == b"12TDCZ", frames
+    encoded = struct.pack("!I", int(numeric_name))
+    assert wire.client.data_row_values(frames) == [[encoded, encoded]], frames
+    assert [(name.decode(), type_oid, fmt) for name, _, _, type_oid, _, _, fmt in
+            wire.client.row_description_fields(frames)] == [("relation", 2205, 1), ("number", 26, 1)], frames
+    parameter = "SELECT $1::pg_catalog.text::pg_catalog.regclass::oid AS number"
+    frames = wire.exchange(wire.parse(parameter, oids=[25]) + wire.bind(arguments=(b"007",)) +
+                           wire.describe_portal() + wire.execute() + wire.packet(b"S"))
+    wire.check(parameter, frames, rows=[(numeric_name,)], fields=[("number", 26)])
+    wire.command("SET search_path=pg_catalog,format_a,format_b,public", "SET")
+    wire.query(projection + " ORDER BY id",
+               rows=[("path_probe", first), ("path_probe", first), *remaining],
+               fields=fields, tag="SELECT 6")
+    wire.command("BEGIN", "BEGIN", ready=b"T")
+    wire.command("ALTER TABLE format_a.path_probe RENAME TO moved_probe", "ALTER TABLE", ready=b"T")
+    wire.query(projection + " WHERE id=1", rows=[("path_probe", second)], fields=fields, ready=b"T")
+    wire.command("ROLLBACK", "ROLLBACK")
+    wire.query(projection + " WHERE id=1", rows=[("path_probe", first)], fields=fields)
+    for name, state in (("format_a.gone", "42P01"), ('"unfinished', "42602"),
+                        ("-", "42P01"), ("4294967296", "42P01")):
+        wire.query(f"SELECT '{name}'::pg_catalog.text::pg_catalog.regclass", state=state, tag=None)
+    wire.query("SELECT '-'::varchar::pg_catalog.regclass", state="42P01", tag=None)
+    wire.query("SELECT CAST('007' AS varchar)::pg_catalog.regclass::oid AS number",
+               rows=[(numeric_name,)], fields=[("number", 26)])
+    wire.query("SELECT '4294967296'::pg_catalog.regclass", state="22003", tag=None)
+    wire.query("SELECT '-'::pg_catalog.regclass AS relation, '007'::pg_catalog.regclass::oid AS number",
+               rows=[("-", "7")], fields=fields)
+    wire.command("SET search_path=pg_catalog,format_b,format_a,public", "SET")
+
+
 def main():
     review = Review("FORMAT_TYPE_PROTOCOL")
     client, sock = review.client, review.sock
@@ -216,6 +280,7 @@ def main():
         display("25", "text")
         wire.query(columns_by_oid.format(equality="a.attrelid='pg_temp.format_temp_probe'::regclass"),
                    rows=[("id", "integer")], fields=fields)
+        check_runtime_regclass(wire)
 
         identity = wire.send_statements("""SELECT 'format_a."Case.Row"'::regtype::oid AS v""")
         oid = client.data_row_values(identity)[0][0].decode()

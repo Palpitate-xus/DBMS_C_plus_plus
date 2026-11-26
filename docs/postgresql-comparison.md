@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 从文本查找表
+
+PostgreSQL 18.6 将 `text` 和 `varchar` 转成 `regclass` 时按关系名查找。显示结果时按对象编号读取目录缓存，再决定是否带上模式名。SQLite 的 `PRAGMA table_xinfo` 先定位指定的表，再遍历它的列。DuckDB 按名称查到候选目录项后，选择当前事务可见的版本。 [PostgreSQL 18.6 转换和输出源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/regproc.c) · [PostgreSQL 18.6 转换声明](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_cast.dat#L247-L250) · [SQLite 3.51.0 表信息源码](https://github.com/sqlite/sqlite/blob/version-3.51.0/src/pragma.c#L1158-L1205) · [DuckDB 1.4.2 目录查找源码](https://github.com/duckdb/duckdb/blob/v1.4.2/src/catalog/catalog_set.cpp#L538-L550)
+
+本项目用当前事务可见的目录按名称和编号查找对应表，沿用原有的目录文件校验。文本 `007` 可以查到名为 `"007"` 的表，直接写下的 `'007'::regclass` 则表示编号 7。目录查询仍会逐行求值运行时文本。文本指定的模式不存在时，本项目返回 `42P01`，PostgreSQL 返回 `3F000`。本项目支持 `模式名.表名`，PostgreSQL 还能在名称里带上当前数据库名。 [测试](test-report.md#regclass-runtime-20261126) · [性能对照](performance-report-2026-10-30.md#regclass-runtime-cost-20261126)
+
 ## 2026-11-26 · 按表名查列时怎样确定对象
 
 PostgreSQL 可以在解析阶段把 `regclass` 字面量转换成实际对象编号，在相关对象变更或搜索路径变化时重新分析已准备的语句。SQLite 执行预编译语句时核对结构版本号。DuckDB 用目录版本与身份识别需要重新绑定的语句。 [PostgreSQL 对象编号类型](https://www.postgresql.org/docs/18/datatype-oid.html) · [PostgreSQL PREPARE](https://www.postgresql.org/docs/18/sql-prepare.html) · [SQLite 结构版本](https://www.sqlite.org/fileformat.html#schema_cookie) · [DuckDB 目录版本检查](https://raw.githubusercontent.com/duckdb/duckdb/v1.4.2/src/main/prepared_statement_data.cpp)

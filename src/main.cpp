@@ -20574,6 +20574,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         !dbms::QueryPlanner::supportsPreparedSelectPlan(*candidate)) return false;
     dbms::DatumMetadataContextPtr castMetadata;
     bool needsDomainCast = false;
+    bool needsRelationCast = false;
     const auto visitCastTarget = [&](const string& spelling) {
         if (needsDomainCast || session.currentDB.empty() || dbms::mapBuiltinTypeNameToOid(
             dbms::ExprHelper::canonicalResultTypeName(spelling))) return;
@@ -20593,8 +20594,14 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
                 dbms::array_detail::isArray(column->binding->declaredType);
         if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
             if (binary->op == "::") {
-                if (const auto* target = dynamic_cast<const dbms::LiteralExpr*>(binary->right.get()))
+                if (const auto* target = dynamic_cast<const dbms::LiteralExpr*>(binary->right.get())) {
                     visitCastTarget(target->value);
+                    if (!needsRelationCast) {
+                        dbms::CatalogManager::QualifiedName name;
+                        needsRelationCast = dbms::CatalogManager::parseQualifiedName(target->value, name, true) &&
+                            name.name == "regclass" && (name.schema.empty() || name.schema == "pg_catalog");
+                    }
+                }
             }
             return (binary->op=="||" && (!prepared || binary->arrayConcat.has_value() ||
                 (dbms::ExprHelper::inferParsedResultType(binary,{},session.currentDB,&g_engine)=="jsonb" ||
@@ -20738,7 +20745,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
                 stringProjection = false;
             }
         }
-        if (descendants.empty() && !roles.first && !scalarOrder && !possibleArray && !needsDomainCast &&
+        if (descendants.empty() && !roles.first && !scalarOrder && !possibleArray && !needsDomainCast && !needsRelationCast &&
             !fromlessDemand && !possibleBitNegation && !physicalLimitDemand && !stringProjection &&
             !stringPredicate && !explicitPredicateCollation && !explicitBetween) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
@@ -20779,7 +20786,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         [](const dbms::QueryOutputColumn& column) { return dbms::array_detail::isArray(column.type); });
     const bool bitNegationOutput=possibleBitNegation && bitNegation(select,true);
     if(descendants.empty() && !roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput &&
-        !needsDomainCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand &&
+        !needsDomainCast && !needsRelationCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand &&
         !typedSortDemand && !stringProjection && !stringPredicate &&
         !explicitPredicateCollation && !declaredPredicateCollations && !explicitBetween) {
         if (!physicalColumnCandidate) return false;

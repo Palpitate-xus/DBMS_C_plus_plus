@@ -89,6 +89,14 @@ int main() {
             "owning array storage retains original OIDs");
         {
             StorageEngine cold;cold.setBackgroundIntervals(60000,60000);
+            auto& coldCatalog = cold.catalogService();
+            coldCatalog.evict(database);
+            need(!coldCatalog.has(database), "reader begins without a cached catalog");
+            const auto reference = coldCatalog.resolveRegclass(database, std::nullopt,
+                                                               "public.moved_reference", &session);
+            need(reference.first == target->oid && reference.second == "moved_reference",
+                 "read-only lookup resolves a renamed relation from the persisted catalog");
+            need(!coldCatalog.has(database), "read-only lookup leaves the catalog uncached");
             need(cold.query(database,"reference_values",{},{"k","r"})==
                 std::vector<std::string>{"1 4294967295 "},"independent cold heap reader retains all 32 OID bits");
         }

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以从数据里的表名查编号 · 2026-11-26</summary>
+
+表名保存在文本列时，可以直接查到这张表的编号。表名只有数字也能查到，例如名为 `007` 的表。在另有 128 张表的测试库里，从 48 行文本查表编号快了约 11%。
+
+[使用说明](docs/MANUAL.md#从文本列查找表的编号) · [测试报告](docs/test-report.md#regclass-runtime-20261126) · [性能报告](docs/performance-report-2026-10-30.md#regclass-runtime-cost-20261126)
+
+</details>
+
+<details>
 <summary>按表名查看列信息更快 · 2026-11-26</summary>
 
 把表名直接写在 SQL 里查列名和类型，数据库可以跳过其他表的列。在另有 32 张表的测试库里，列出四列的用时从约 95 毫秒降到约 6 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>修复撤销表结构改动后关闭数据库时的崩溃 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 修复撤销表结构改动后关闭数据库时的崩溃
 
 通过 C++ 使用数据库时，撤销对表结构的修改后，可以正常关闭数据库。
 
 [测试报告](docs/test-report.md#catalog-shutdown-20261126) · [性能报告](docs/performance-report-2026-10-30.md#catalog-shutdown-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 读取表和列的信息时少做重复工作
 

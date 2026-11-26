@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 执行时按文本查表
+
+从 `text` 或 `varchar` 转成 `regclass` 时按表名查找，包括由数字组成的表名。普通表查询中可以直接写 `列名::regclass`。读取名称和显示形式只需要查对应的目录项，随后转换成数字可以复用已有表编号。参数仍在执行时查找，目录等值筛选尚无参数专用索引路径。 `CAT-03`、`QRY-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#regclass-runtime-20261126) · [性能对照](performance-report-2026-10-30.md#regclass-runtime-cost-20261126)
+
 ## 2026-11-26 · 复用字面表名对应的编号
 
 目录等值比较可复用已通过 `regclass` 输入校验的真实对象编号。仍需运行时求值的表名由原路径处理。已准备语句在恢复同名表后的保留规则与 PostgreSQL 仍有差异。`CAT-03`、`QRY-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#regclass-catalog-filter-20261126) · [性能对照](performance-report-2026-10-30.md#regclass-catalog-cost-20261126)
