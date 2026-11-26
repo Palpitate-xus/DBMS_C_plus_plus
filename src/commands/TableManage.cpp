@@ -22,6 +22,7 @@
 #include "commands/VacuumFullBackup.h"
 #include "common/DbError.h"
 #include "common/DatabaseMetadataWrite.h"
+#include "process/StatsPersistence.h"
 #include "commands/InheritanceGraph.h"
 #include "catalog/PgInheritanceCatalog.h"
 #include "catalog/PgAccessMethodCatalog.h"
@@ -42629,7 +42630,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             else if (requested.name == "pg_type" || requested.name == inheritance_catalog::name ||
                      requested.name == access_method_catalog::name || requested.name == collation_catalog::name ||
                      requested.name == foreign_key_catalog::name || requested.name == roles_catalog::name ||
-                     requested.name == index_catalog::name)
+                     requested.name == index_catalog::name || requested.name == description_catalog::name)
                 schemas = effectiveRelationSearchPath(session);
             else {
                 std::string canonical; std::vector<std::string> path;
@@ -42702,6 +42703,9 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         if (requested.name == index_catalog::name)
                             default_catalog::validate(catalog, index_catalog::relationOid,
                                 index_catalog::name, index_catalog::fields, 19);
+                        if (requested.name == description_catalog::name)
+                            default_catalog::validate(catalog, description_catalog::relationOid,
+                                description_catalog::name, description_catalog::fields);
                         for(auto& column:description.columns) {
                             if (!column.typeOid) column.typeOid=mapBuiltinTypeNameToOid(column.type);
                             if(column.typeOid)column.typeMetadata=metadata.datumType(column.type,column.typeOid);
@@ -55587,6 +55591,31 @@ static bool stageDirectoryReplacement(
     return false;
 }
 
+bool upgradeExistingDescriptionDeclaration(const std::filesystem::path& database) {
+    const auto catalog = database / "pg_catalog";
+    if (!description_catalog::needsStagedUpgrade(catalog)) return true;
+    const DatabaseMetadataWrite owner(database);
+    if (!owner.acquired()) return false;
+    const StatsFileLock bootstrap(database / ".description_catalog_upgrade");
+    if (!bootstrap.ok()) return false;
+    if (!description_catalog::needsStagedUpgrade(catalog)) return true;
+
+    DurableDirectoryReplacement replacement;
+    if (!stageDirectoryReplacement(&catalog, catalog, "description_upgrade", replacement))
+        return false;
+    try {
+        if (!description_catalog::upgradeStagedDeclaration(replacement.staging) ||
+            !publishDirectoryReplacement(replacement)) {
+            if (!replacement.published) (void)discardDirectoryReplacement(replacement);
+            return false;
+        }
+    } catch (...) {
+        if (!replacement.published) (void)discardDirectoryReplacement(replacement);
+        throw;
+    }
+    return discardDirectoryReplacement(replacement);
+}
+
 static bool collectPhysicalBackupEntries(
     const std::filesystem::path& root,
     PhysicalBackupDirectories& directories,
@@ -56906,7 +56935,9 @@ bool StorageEngine::physicalRestoreLocked(
 
         // Reconcile the exact staged generation while it is still private.
         // Internal transaction/savepoint restores pass no admission object.
-        if (admission && !admission->reconcile(*this, dbname, restoreReplacements)) {
+        if (admission && (!admission->reconcile(*this, dbname, restoreReplacements) ||
+            !description_catalog::upgradeStagedDeclaration(
+                restoreReplacements.front().staging / "pg_catalog"))) {
             discardUnpublished();
             return false;
         }

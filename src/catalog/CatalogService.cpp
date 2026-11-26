@@ -19,6 +19,7 @@
 #include "catalog/PgForeignKeyCatalog.h"
 #include "catalog/PgRolesCatalog.h"
 #include "catalog/PgIndexCatalog.h"
+#include "catalog/description_catalog.h"
 #include "catalog/ExplicitIndexAttributes.h"
 #include "catalog/PgIndexPredicate.h"
 #include "catalog/DatumMetadataFactory.h"
@@ -218,6 +219,19 @@ bool catalogVersionPublished(const fs::path& path, std::string_view version) {
     return true;
 }
 
+void bootstrapDescriptionCatalog(CatalogManager& catalog, bool requireExisting) {
+    using namespace description_catalog;
+    const bool created = default_catalog::bootstrapOne(catalog, relationOid, name, fields, requireExisting);
+    auto relation = catalog.getClass(relationOid).value();
+    if (created) {
+        relation.relam = access_method_catalog::heapOid;
+        if (!catalog.updateClass(relationOid, relation))
+            throw DbError("XX001", "could not register description catalog relation");
+    } else if (relation.relam != access_method_catalog::heapOid) {
+        throw DbError("XX001", "invalid description catalog access method");
+    }
+}
+
 void initializeColumnCollations(const StorageEngine& engine, const std::string& database,
                                 CatalogManager& catalog) {
     std::unordered_map<std::string, Oid> physicalOwners;
@@ -342,6 +356,8 @@ bool databaseIdentity(const std::filesystem::path& path, CatalogDatabaseIdentity
 std::shared_ptr<CatalogManager> loadOwnedCatalog(
     const StorageEngine& engine, const std::string& database) {
     const auto directory = catalogDirForDb(engine, database);
+    if (!upgradeExistingDescriptionDeclaration(directory.parent_path()))
+        throw DbError("58030", "could not upgrade description catalog for " + database);
     // Allocated system view/row-type OIDs must be published by one actual
     // startup/DDL owner before another engine can initialize the same image.
     // Read-only metadata snapshots never enter this mutable bootstrap path.
@@ -438,6 +454,9 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     }
     const bool publishedDefaultCatalog = default_catalog::published(directory);
     const bool initializedDefaultCatalog = default_catalog::bootstrap(*catalog, publishedDefaultCatalog);
+    const auto descriptionMarker = directory / description_catalog::versionFile;
+    const bool publishedDescriptions = catalogVersionPublished(descriptionMarker, description_catalog::version);
+    bootstrapDescriptionCatalog(*catalog, publishedDescriptions);
     const auto foreignKeyMarker = directory / ".foreign_key_catalog_version";
     const bool publishedForeignKeys = catalogVersionPublished(foreignKeyMarker, foreign_key_catalog::version);
     const bool initializedForeignKeys = default_catalog::bootstrapOne(*catalog,
@@ -522,7 +541,7 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedRoles || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || initializedForeignKeys || !publishedForeignKeys || initializedIndexes || !publishedIndexes || !publishedPrimaryIndexes || !publishedPrimaryKeys || !publishedExplicitIndexAttributes) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedRoles || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || !publishedForeignKeys || initializedForeignKeys || initializedIndexes || !publishedIndexes || !publishedPrimaryIndexes || !publishedPrimaryKeys || !publishedExplicitIndexAttributes || !publishedDescriptions) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
     if (!publishedExplicitIndexAttributes && index_file::writeAtomicallyNoReplace(
             explicitIndexAttributesMarker, explicitIndexAttributesVersion) != index_file::WriteResult::OK)
@@ -571,8 +590,25 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
             directory / ".attribute_default_catalog_version", default_catalog::version)
             != index_file::WriteResult::OK)
         throw DbError("58030", "could not publish attribute default catalog version");
+    if (!publishedDescriptions && index_file::writeAtomicallyNoReplace(
+            descriptionMarker, description_catalog::version) != index_file::WriteResult::OK)
+        throw DbError("58030", "could not publish description catalog version");
     return catalog;
 }
+}
+
+bool description_catalog::needsStagedUpgrade(const fs::path& catalogDirectory) {
+    return !catalogVersionPublished(catalogDirectory / versionFile, version) &&
+        catalogVersionPublished(catalogDirectory / ".owned_system_catalog_version", "DBMS_SYSTEM_CATALOG_DECLS1\n");
+}
+
+bool description_catalog::upgradeStagedDeclaration(const fs::path& catalogDirectory) {
+    const auto marker = catalogDirectory / versionFile;
+    if (!needsStagedUpgrade(catalogDirectory)) return true;
+    CatalogManager catalog(catalogDirectory.string(), false);
+    bootstrapDescriptionCatalog(catalog, false);
+    return catalog.persistAll() &&
+        index_file::writeAtomicallyNoReplace(marker, version) == index_file::WriteResult::OK;
 }
 
 bool initializeCreatedDatabaseCatalog(const StorageEngine& engine,const std::string& database) {

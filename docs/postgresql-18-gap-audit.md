@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 注释目录可按名称查找
+
+注释目录在 `pg_class` 和 `pg_attribute` 中有正式登记，`regclass`、名称可见性和协议字段来源使用同一身份。普通 `EXPLAIN` 和 `EXPLAIN ANALYZE` 能展示该查询的实际目录扫描。旧版数据和旧版备份的升级经过验证。实体索引及更多系统目录仍待补齐，`CAT-03`、`MON-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#description-relation-20261126) · [性能报告](performance-report-2026-10-30.md#description-relation-cost-20261126)
+
 ## 2026-11-26 · 用更小的注释日志恢复
 
 只执行 `COMMENT ON` 时，恢复记录只包含 `.comments` 与 `pg_description.cat`，同一事务随后建表时再补齐其他文件。在保留完整初始日志时，启动恢复可根据目标时间保留或撤销这笔注释事务。其他目标后提交、已有时间线分叉及混合建表的日志仍拒绝按此方式恢复。注释历史和新内容尚未接入可从备份重放的目录日志。`CAT-03`、`WAL-08` 和 `BACKUP-04` 维持部分实现。 [测试报告](test-report.md#comment-compact-undo-20261126) · [性能报告](performance-report-2026-10-30.md#comment-compact-undo-cost-20261126)

@@ -6178,8 +6178,14 @@ static bool handleExplain(const string& sql, Session& s) {
         // including queries that yield no rows and plain EXPLAIN cache hits.
         auto prepared = make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(s.currentDB, inner));
         auto* select = static_cast<dbms::SelectStmt*>(prepared->ast.get());
+        const bool readsDescriptions = any_of(prepared->sourceRanges.begin(), prepared->sourceRanges.end(),
+            [](const auto& range) {
+                return range.relationSchema == "pg_catalog" &&
+                    range.relationName == dbms::description_catalog::name &&
+                    !range.cteStatement && !range.viewQuery;
+            });
         if (select->selectList.empty() || usesDemandedLogicalRead(*prepared) ||
-            (integerJoinProbe && canRunPreparedIntegerJoin(*prepared, s)))
+            readsDescriptions || (integerJoinProbe && canRunPreparedIntegerJoin(*prepared, s)))
             return explainPreparedReadQuery(s,inner,opts,isJson,std::move(prepared));
         // Scalar query children acquire their AST role during pure binding;
         // do not mistake their parser envelope literal for a physical target.
@@ -21012,6 +21018,7 @@ class PreparedWithDmlRuntime {
     dbms::SelectStmt* readRoot_;
     bool readRootDeclaredCollations_ = false;
     bool streamResults_ = false;
+    bool planOnly_ = false;
     dbms::PreparedQueryExecution validation_;
     Frames queryFrames_;
     vector<shared_ptr<dbms::PreparedQueryCursor>> mutationCursors_;
@@ -21561,6 +21568,7 @@ class PreparedWithDmlRuntime {
             shared_ptr<dbms::Operator> scan;
             shared_ptr<PreparedWithDmlRuntime> viewRuntime;
             shared_ptr<dbms::PreparedQueryRows> virtualRows;
+            shared_ptr<const vector<dbms::PgDescriptionRow>> descriptionRows;
             shared_ptr<optional<dbms::PreparedQueryRows>> statisticsRows;
             shared_ptr<dbms::TypeCatalogScan> typeRows;
             shared_ptr<dbms::CatalogAttributeScan> attributeRows;
@@ -21579,7 +21587,7 @@ class PreparedWithDmlRuntime {
                     ? range.relationName : range.relationSchema + "." + range.relationName;
                 if (!canReadWholeTable(session_, view))
                     throw dbms::DbError("42501","permission denied for view source");
-                viewRuntime=make_shared<PreparedWithDmlRuntime>(session_,range.viewQuery,streamResults_);
+                viewRuntime=make_shared<PreparedWithDmlRuntime>(session_,range.viewQuery,streamResults_,planOnly_);
                 auto* select=dynamic_cast<dbms::SelectStmt*>(range.viewQuery->ast.get());
                 if(!select)throw dbms::DbError("0A000","view source requires a genuine SELECT/VALUES plan");
                 cursor=dbms::QueryPlanner::makePreparedCursor(viewRuntime->selectPlan(select,dbms::RowContext{},{}),range.columns);
@@ -21628,10 +21636,13 @@ class PreparedWithDmlRuntime {
                 for(const auto& row:g_engine.catalogService().namespaceSnapshot(session_.currentDB))
                     virtualRows->push_back(dbms::ownedNamespaceCatalogCells(row));
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::description_catalog::name) {
-                virtualRows = make_shared<dbms::PreparedQueryRows>();
-                for (const auto& row : g_engine.catalogService().descriptionSnapshot(
-                         session_.currentDB, dbms::description_catalog::objectFilter(range)))
-                    virtualRows->push_back(dbms::description_catalog::cells(row));
+                const auto object = dbms::description_catalog::objectFilter(range);
+                node->planName = "Catalog Scan";
+                node->planAttributes["relation"] = dbms::description_catalog::name;
+                if (object) node->planAttributes["objectOid"] = to_string(*object);
+                descriptionRows = make_shared<const vector<dbms::PgDescriptionRow>>(
+                    planOnly_ ? vector<dbms::PgDescriptionRow>{} :
+                    g_engine.catalogService().descriptionSnapshot(session_.currentDB, object));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_settings") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgSettingsRows(session_));
             } else if(item->type==dbms::FromItem::Type::Table && !range.cteStatement) {
@@ -21667,7 +21678,7 @@ class PreparedWithDmlRuntime {
             };
             auto lookupBindings = (typeRows || collationRows) ? catalogLookupBindings(range) : vector<dbms::QueryColumnBinding>{};
             if (!lookupBindings.empty()) node->planAttributes["catalogOidLookup"] = "true";
-            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,statisticsRows,typeRows,attributeRows,
+            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,descriptionRows,statisticsRows,typeRows,attributeRows,
                         collationRows,scanOpened,source=node.get(),ordinality=item->withOrdinality,
                         lookupBindings=std::move(lookupBindings),lookupOid=optional<dbms::Oid>{}]
                 (size_t index,dbms::RowContext& row) mutable {
@@ -21681,6 +21692,12 @@ class PreparedWithDmlRuntime {
                 }
                 else if(typeRows) found=typeRows->read(g_engine.catalogService(),session_.currentDB,index,cells,lookupOid);
                 else if(attributeRows) found=attributeRows->read(g_engine,session_.currentDB,query_->parameters,index,cells);
+                else if (descriptionRows) {
+                    if (index < descriptionRows->size()) {
+                        cells = dbms::description_catalog::cells((*descriptionRows)[index]);
+                        found = true;
+                    }
+                }
                 else if(collationRows) {
                     const auto& entries = dbms::collation_catalog::collations;
                     auto entry = entries.end();
@@ -22129,10 +22146,11 @@ public:
         return affected;
     }
 
-    PreparedWithDmlRuntime(Session& session,shared_ptr<dbms::PreparedQuery> query,bool streamResults=false)
+    PreparedWithDmlRuntime(Session& session,shared_ptr<dbms::PreparedQuery> query,
+                           bool streamResults=false,bool planOnly=false)
         :session_(session),query_(std::move(query)),root_(dynamic_cast<dbms::WithStmt*>(query_->ast.get())),
          readRoot_(dynamic_cast<dbms::SelectStmt*>(query_->ast.get())),streamResults_(streamResults),
-         validation_(query_,&g_engine,session.currentDB) {
+         planOnly_(planOnly),validation_(query_,&g_engine,session.currentDB) {
         if(!root_ && !readRoot_ && !dynamic_cast<dbms::InsertStmt*>(query_->ast.get()) &&
            !dynamic_cast<dbms::UpdateStmt*>(query_->ast.get()) && !dynamic_cast<dbms::DeleteStmt*>(query_->ast.get()))
             throw dbms::DbError("XX000","prepared runtime requires a genuine query envelope");
@@ -23720,7 +23738,7 @@ static bool explainPreparedReadQuery(Session& session,const string& raw,
     const dbms::QueryPlanner::ExplainOptions& options,bool json,
     shared_ptr<dbms::PreparedQuery> query) {
     if(!query)query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
-    PreparedWithDmlRuntime runtime(session,query,usesDemandedLogicalRead(*query));
+    PreparedWithDmlRuntime runtime(session,query,usesDemandedLogicalRead(*query),!options.analyze);
     auto plan=runtime.queryPlan();
     // Writer completion is part of the exact successful statement. The
     // publication sink remains outer-commit gated by execute().

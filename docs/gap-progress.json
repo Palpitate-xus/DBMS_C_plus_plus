@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-26 register the pg_description relation and column identities",
+      "gap_ids": ["CAT-03", "MON-01", "CLIENT-01"],
+      "status": "partial",
+      "evidence": ["src/catalog/CatalogService.cpp", "src/commands/TableManage.cpp", "src/main.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/object_description_protocol_e2e_test.py", "tests/physical_restore_catalog_staging_test.cpp"],
+      "verification": [
+        "Compare the registered relation number, search path, wire column origins and EXPLAIN ANALYZE row counts with PostgreSQL 18.6.",
+        "Reopen an old data directory, retry after an interrupted catalog upgrade, and restore an old backup into a running instance.",
+        "Measure limited, keyed and counted comment reads and a plain data read. The PostgreSQL index and policy catalog remain open."
+      ]
+    },
+    {
       "issue": "2026-11-26 save only annotation files in comment undo",
       "gap_ids": ["CAT-03", "WAL-08", "BACKUP-04"],
       "status": "partial",

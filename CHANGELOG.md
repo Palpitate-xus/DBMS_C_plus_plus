@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以查看注释查询怎么执行 · 2026-11-26</summary>
+
+用 `EXPLAIN` 可以查看查询注释的步骤。程序也能按名字找到注释目录 `pg_description`。
+
+[使用说明](docs/MANUAL.md#查看对象注释) · [测试报告](docs/test-report.md#description-relation-20261126) · [性能报告](docs/performance-report-2026-10-30.md#description-relation-cost-20261126)
+
+</details>
+
+<details>
 <summary>修改注释所需的临时备份更小 · 2026-11-26</summary>
 
 在另有 128 张表的测试库里，只修改一条注释时，临时备份从约 131 KB 降到不到 1 KB。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以查到给表和列写的注释 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 可以查到给表和列写的注释
 
 用 SQL 就能查看之前写下的说明，例如订单表的用途或金额列用的货币。注释里的引号和换行也会原样保留。
 
 [使用说明](docs/MANUAL.md#查看对象注释) · [测试报告](docs/test-report.md#object-description-20261126) · [性能报告](docs/performance-report-2026-10-30.md#object-description-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 查找其他连接的临时表分组更快
 

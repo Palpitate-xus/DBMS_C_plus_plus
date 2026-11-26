@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 注释目录可按名称查找
+
+PostgreSQL 18.6 在 `pg_class` 登记注释目录，支持按名称和搜索路径转换为 `regclass`。SQLite 允许查询 `sqlite_schema`，该表没有登记自身。DuckDB 通过 `duckdb_tables()` 和 `duckdb_columns()` 提供对象编号和列信息。 [PostgreSQL 目录定义](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_description.h#L46-L64) · [PostgreSQL 对象编号](https://www.postgresql.org/docs/18/datatype-oid.html) · [SQLite 模式表](https://www.sqlite.org/schematab.html) · [DuckDB 目录函数](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions)
+
+本项目登记固定关系编号 2609、四列及数据库自身分配的行类型。按搜索路径解析同名表，直接选择目录列时向客户端返回来源编号。执行计划显示实际使用的目录扫描，PostgreSQL 在受测的对象编号过滤条件下使用实体索引。本项目尚未补齐 PostgreSQL 的预置注释、注释索引以及 `psql \d` 所查的 `pg_policy`。 [测试报告](test-report.md#description-relation-20261126) · [性能报告](performance-report-2026-10-30.md#description-relation-cost-20261126)
+
 ## 2026-11-26 · 只备份注释文件
 
 PostgreSQL 从基础备份重放归档的预写日志，可以在指定位置停止。SQLite 的回滚日志保存旧内容，预写日志模式则把改动写入日志后再合入数据库文件。DuckDB 将对象注释保存为目录元数据。 [PostgreSQL 恢复说明](https://www.postgresql.org/docs/18/continuous-archiving.html) · [SQLite 日志说明](https://sqlite.org/wal.html#how_wal_works) · [DuckDB 注释说明](https://duckdb.org/docs/1.5/sql/statements/comment_on)
@@ -22,7 +28,7 @@ PostgreSQL 18.6 的 `pg_description` 用对象编号、所属目录和子对象�
 
 一条 SQL 先调用会改写注释的函数，再读取注释时，本项目会立即读到新内容。PostgreSQL 18.6 在该语句中仍读到旧内容，下一条语句才读到新内容。 [PostgreSQL 函数可见性说明](https://www.postgresql.org/docs/18/xfunc-volatility.html)
 
-`pg_description` 已能直接查询，`'pg_catalog.pg_description'::regclass` 和部分 `EXPLAIN` 查询仍需要补齐。
+该版本已经能直接查询 `pg_description`。后续版本补齐了按名称查找和执行计划支持。
 
 ## 2026-11-26 · 在一次查询中复用模式编号索引
 

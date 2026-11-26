@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read persisted comments using PostgreSQL catalog identities and wire types."""
 
+import re
 import socket
 import struct
 import sys
@@ -8,8 +9,56 @@ import sys
 from session_setting_functions_protocol_e2e_test import Wire, runner
 
 
+def check_plan(client, wire, sql, reference, count=None):
+    frames = wire.send_statements(sql)
+    rows = [row[0].decode() for row in client.data_row_values(frames)]
+    wire.check(sql, frames, rows=[(row,) for row in rows], tag='EXPLAIN', fields=[('QUERY PLAN',25)])
+    scan = 'Index Scan' if reference else 'Catalog Scan'
+    description_scans = [row for row in rows if scan in row and 'pg_description' in row]
+    assert description_scans, rows
+    if count is not None:
+        actual = [float(value) for row in description_scans
+                  for value in re.findall(r'actual rows=(\d+(?:\.\d+)?) ', row)]
+        assert actual == [count], rows
+
+
+def check_relation(client, wire, reference):
+    wire.query("SELECT 'pg_catalog.pg_description'::regclass::oid AS v",
+               rows=[('2609',)], fields=[('v', 26)])
+    wire.query("SELECT 2609::oid::regclass AS v",
+               rows=[('pg_description',)], fields=[('v', 2205)])
+    wire.query("SELECT relname,relnamespace,relkind,relnatts FROM pg_catalog.pg_class WHERE oid=2609",
+               rows=[('pg_description', '11', 'r', '4')],
+               fields=[('relname', 19), ('relnamespace', 26), ('relkind', 18), ('relnatts', 21)])
+    wire.query("SELECT attname,atttypid,attnum,attnotnull,attcollation FROM pg_catalog.pg_attribute "
+               "WHERE attrelid=2609 AND attnum>0 ORDER BY attnum",
+               rows=[('objoid','26','1','t','0'), ('classoid','26','2','t','0'),
+                     ('objsubid','23','3','t','0'), ('description','25','4','t','950')],
+               fields=[('attname',19), ('atttypid',26), ('attnum',21), ('attnotnull',16), ('attcollation',26)],
+               tag='SELECT 4')
+
+    for analyze, count in (('', None), ('ANALYZE, TIMING OFF, ', 0)):
+        sql = f"EXPLAIN ({analyze}COSTS OFF) SELECT description FROM pg_catalog.pg_description WHERE objoid=4294967295"
+        check_plan(client, wire, sql, reference, count)
+
+    wire.command('CREATE SCHEMA comment_shadow', 'CREATE SCHEMA')
+    wire.command('CREATE TABLE comment_shadow.pg_description(note text)', 'CREATE TABLE')
+    wire.command("INSERT INTO comment_shadow.pg_description VALUES ('shadow')", 'INSERT 0 1')
+    wire.command('SET search_path=comment_shadow,pg_catalog', 'SET')
+    wire.query('SELECT * FROM pg_description', rows=[('shadow',)], fields=[('note',25)])
+    wire.query("SELECT 'pg_description'::regclass::oid = 'comment_shadow.pg_description'::regclass::oid AS v",
+               rows=[('t',)], fields=[('v',16)])
+    wire.query('SELECT 2609::oid::regclass AS v, pg_table_is_visible(2609) AS visible',
+               rows=[('pg_catalog.pg_description','f')], fields=[('v',2205),('visible',16)])
+    wire.command("UPDATE pg_description SET note='updated shadow'", 'UPDATE 1')
+    wire.query('SELECT note FROM pg_description', rows=[('updated shadow',)], fields=[('note',25)])
+    wire.command('RESET search_path', 'RESET')
+    wire.query("SELECT pg_catalog.pg_table_is_visible(2609) AS v", rows=[('t',)], fields=[('v',16)])
+
+
 def check(client, sock, reference):
     wire = Wire(client, sock)
+    check_relation(client, wire, reference)
     wire.command('CREATE SCHEMA comment_lookup', 'CREATE SCHEMA')
     wire.command('CREATE TABLE comment_lookup.notes(id integer, body text)', 'CREATE TABLE')
     wire.command('CREATE INDEX notes_body ON comment_lookup.notes(body)', 'CREATE INDEX')
@@ -36,11 +85,17 @@ def check(client, sock, reference):
     view = oid("SELECT 'comment_lookup.note_view'::regclass::oid")
     note_type = oid("SELECT oid FROM pg_catalog.pg_type WHERE typname='note_state' AND "
                     f"typnamespace='{namespace}'::oid")
+    check_plan(client, wire, "EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF) "
+               f"SELECT description FROM pg_catalog.pg_description WHERE objoid={table}::oid", reference, 2)
     rows = [(str(table), '1259', '0', 'table details'), (str(table), '1259', '2', multiline)]
     fields = [('objoid', 26), ('classoid', 26), ('objsubid', 23), ('description', 25)]
     catalog = f"SELECT * FROM pg_catalog.pg_description WHERE objoid='{table}'::oid ORDER BY objsubid"
     for mode in (wire, Wire(client, sock, extended=True)):
-        mode.query(catalog, rows=rows, fields=fields, tag='SELECT 2')
+        frames = mode.send_statements(catalog)
+        mode.check(catalog, frames, rows=rows, fields=fields, tag='SELECT 2')
+        assert [field[1:4] for field in client.row_description_fields(frames)] == [
+            (2609, 1, 26), (2609, 2, 26), (2609, 3, 23), (2609, 4, 25),
+        ], frames
         for expression, expected in (
             (f"pg_catalog.obj_description('{namespace}'::oid, 'pg_namespace')", 'schema details'),
             (f"obj_description('{table}'::oid)", 'table details'),
