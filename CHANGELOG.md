@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>磁盘上的表改名更快 · 2026-11-26</summary>
+
+在 ext4 测试盘上，额外有 128 张表时，改一张表名的耗时从约 3.6 秒降到约 1.8 秒。
+
+[测试报告](docs/test-report.md#backup-file-sync-20261126) · [性能报告](docs/performance-report-2026-10-30.md#backup-file-sync-cost-20261126)
+
+</details>
+
+<details>
 <summary>库里表多时，改表名更快 · 2026-11-26</summary>
 
 在内存文件系统上，测试库多了 512 张表后，改一张表名的耗时从约 360–530 毫秒降到约 290–330 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>库里列多时，按主键查一行更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 库里列多时，按主键查一行更快
 
 在额外建了 4,096 列、只给目标表写了一条注释的测试库里，按主键查一行从约 8 毫秒降到约 4.5 毫秒。
 
 [测试报告](docs/test-report.md#attribute-publication-20261126) · [性能报告](docs/performance-report-2026-10-30.md#attribute-publication-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 列注释多时，按主键查一行更快
 

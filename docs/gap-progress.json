@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 check and sync independent files together before physical backup publication",
+      "gap_ids": ["BACKUP-01", "BACKUP-02", "WAL-07"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/physical_backup_replacement_test.cpp", "tests/physical_backup_manifest_test.cpp", "tests/cold_start_transaction_backup_protocol_e2e_test.py", "tests/restore_parameter_status_protocol_e2e_test.py"],
+      "verification": [
+        "Fail the sync of one copied payload and confirm the previous backup can still be used.",
+        "Stop the process during file sync for an ordinary backup and a rename, then reopen the original database.",
+        "Verify manifest entries against published files and time the full backup and rename on the matching fixtures."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 keep unrelated relation caches and open WAL during a table rename",
       "gap_ids": ["STO-02", "SQL-11", "WAL-05"],
       "status": "partial",

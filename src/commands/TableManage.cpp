@@ -55699,6 +55699,7 @@ static bool collectManifestCreationEntries(
     std::filesystem::recursive_directory_iterator iterator(root, error);
     const std::filesystem::recursive_directory_iterator end;
     if (error) return false;
+    std::vector<std::pair<std::filesystem::path, PhysicalBackupFileEntry*>> toSync;
     for (; iterator != end; iterator.increment(error)) {
         if (error) return false;
         const auto& entry = *iterator;
@@ -55715,13 +55716,51 @@ static bool collectManifestCreationEntries(
             continue;
         }
         if (error || !entry.is_regular_file(error) || error) return false;
-        PhysicalBackupFileEntry file;
-        if (!digestManifestFile(entry.path(), file, syncFiles) ||
-            !files.emplace(name, std::move(file)).second) {
+        const auto [file, inserted] = files.try_emplace(name);
+        if (!inserted) return false;
+        if (syncFiles) {
+            toSync.emplace_back(entry.path(), &file->second);
+        } else if (!digestManifestFile(entry.path(), file->second, false)) {
             return false;
         }
     }
-    return !error;
+    if (error) return false;
+    if (toSync.size() < 128) {
+        return std::all_of(toSync.begin(), toSync.end(), [](const auto& file) {
+            return digestManifestFile(file.first, *file.second, true);
+        });
+    }
+
+    // Files in the private staging tree have no dependency on each other.
+    // Batch their digest and fsync work before the caller syncs directories
+    // and publishes the manifest. Each worker fills different map entries;
+    // the map's structure is fixed until all workers have joined.
+    std::atomic<size_t> next{0};
+    std::atomic<bool> valid{true};
+    const auto syncFilesForWorker = [&]() {
+        try {
+            while (valid.load(std::memory_order_relaxed)) {
+                const size_t index = next.fetch_add(1, std::memory_order_relaxed);
+                if (index >= toSync.size()) return;
+                const auto& [path, file] = toSync[index];
+                if (!digestManifestFile(path, *file, true)) break;
+            }
+        } catch (...) {
+            // The staging tree must not be published after a worker failed.
+        }
+        valid.store(false, std::memory_order_relaxed);
+    };
+    std::array<std::thread, 3> workers;
+    try {
+        for (auto& worker : workers) worker = std::thread(syncFilesForWorker);
+    } catch (...) {
+        // The caller and any workers already started can finish the queue.
+    }
+    syncFilesForWorker();
+    for (auto& worker : workers) {
+        if (worker.joinable()) worker.join();
+    }
+    return valid.load(std::memory_order_relaxed);
 }
 
 static bool writePhysicalBackupManifest(const std::filesystem::path& root,

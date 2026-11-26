@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 备份文件的同步
+
+PostgreSQL 的 `pg_basebackup` 从运行中的集群取备份并生成文件清单，默认在客户端逐个打开并同步文件。SQLite 的在线备份接口按数据库页复制。DuckDB 的 `CHECKPOINT` 将日志同步到数据库文件，`EXPORT DATABASE` 则导出定义和表数据。 [PostgreSQL pg_basebackup](https://www.postgresql.org/docs/18/app-pgbasebackup.html) · [SQLite 在线备份](https://www.sqlite.org/backup.html) · [DuckDB CHECKPOINT](https://duckdb.org/docs/1.5/sql/statements/checkpoint) · [DuckDB EXPORT DATABASE](https://duckdb.org/docs/1.5/sql/statements/export)
+
+项目的物理备份仍使用自己的备份格式。较大的备份可以同时校验和同步多份文件，同一流程也用于表改名等需要整库回滚备份的操作。普通表改名在 PostgreSQL 中只更新目录，项目的整库回滚备份仍是两者的主要成本差别。 [功能测试](test-report.md#backup-file-sync-20261126) · [性能报告](performance-report-2026-10-30.md#backup-file-sync-cost-20261126) · [PostgreSQL 改名](https://www.postgresql.org/docs/18/sql-altertable.html)
+
 ## 2026-11-26 · 普通表改名
 
 PostgreSQL 在持有目标关系锁时更新目录里的表名及其行类型名，数据文件不随名称改动。SQLite 在 `sqlite_schema` 中重写表定义和引用，表内容保持原样。DuckDB 在事务中修改目录，改名可以回滚，依赖它的视图需要单独更新。 [PostgreSQL 18.6 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L4022-L4102) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html) · [DuckDB ALTER TABLE](https://duckdb.org/docs/1.5/sql/statements/alter_table)

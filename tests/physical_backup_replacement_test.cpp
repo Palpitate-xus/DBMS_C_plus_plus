@@ -1,15 +1,47 @@
+// test_link_flags: -Wl,--wrap=fsync
+
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
 #include "access/IndexFileUtil.h"
 #include "test_utils.h"
 
+#include <array>
+#include <atomic>
 #include <cassert>
+#include <cerrno>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <string_view>
+#include <unistd.h>
+
+namespace {
+std::atomic<bool> failStagedFileSync{false};
+}
+
+extern "C" int __real_fsync(int descriptor);
+extern "C" int __wrap_fsync(int descriptor) {
+    if (failStagedFileSync.load(std::memory_order_relaxed)) {
+        const std::string link = "/proc/self/fd/" + std::to_string(descriptor);
+        std::array<char, 4096> buffer;
+        const ssize_t length = ::readlink(link.c_str(), buffer.data(), buffer.size());
+        if (length > 0) {
+            const std::string_view path(buffer.data(), static_cast<size_t>(length));
+            constexpr std::string_view suffix = "/backup_payload/item-97";
+            if (path.find(".backup_staging.") != std::string_view::npos &&
+                path.size() >= suffix.size() &&
+                path.substr(path.size() - suffix.size()) == suffix &&
+                failStagedFileSync.exchange(false, std::memory_order_relaxed)) {
+                errno = EIO;
+                return -1;
+            }
+        }
+    }
+    return __real_fsync(descriptor);
+}
 
 int main() {
     cleanupAllTestData();
@@ -39,6 +71,22 @@ int main() {
     assert(engine.createTable(database, current) == dbms::DBStatus::OK);
     assert(engine.insert(database, "current_table", {{"id", "2"}}) ==
            dbms::DBStatus::OK);
+
+    // Exercise a staging tree large enough to sync several files together.
+    // A payload sync failure must leave the previously published backup.
+    const auto extra = engine.dbPath(database) / "backup_payload";
+    assert(std::filesystem::create_directory(extra));
+    for (int index = 0; index < 160; ++index) {
+        std::ofstream payload(extra / ("item-" + std::to_string(index)));
+        payload << std::string(static_cast<size_t>(index), 'x');
+        assert(payload.good());
+    }
+    failStagedFileSync.store(true, std::memory_order_relaxed);
+    assert(!engine.physicalBackup(database, backup));
+    assert(!failStagedFileSync.load(std::memory_order_relaxed));
+    assert(std::filesystem::is_regular_file(
+        std::filesystem::path(backup) / "obsolete_table.stc"));
+    assert(!std::filesystem::exists(std::filesystem::path(backup) / "backup_payload"));
 
     // Fail the parent-directory sync immediately after the atomic exchange.
     // The old generation must be exchanged back before failure is reported.
@@ -93,6 +141,9 @@ int main() {
     assert(engine.tableExists(database, "current_table"));
     assert(!engine.tableExists(database, "obsolete_table"));
     assert(!engine.tableExists(database, "after_backup"));
+    for (int index = 0; index < 160; ++index)
+        assert(std::filesystem::file_size(extra / ("item-" + std::to_string(index))) ==
+               static_cast<uintmax_t>(index));
 
     finalCleanupTestData();
     std::cout << "[PHYSICAL BACKUP REPLACEMENT] passed\n";
