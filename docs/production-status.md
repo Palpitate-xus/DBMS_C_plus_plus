@@ -6,6 +6,10 @@
 
 截至 2026-11-26，273 项功能要求中有 22 项完成、169 项部分实现、67 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-26 · 查看临时模式编号和归属
+
+可以用 `pg_my_temp_schema()` 查询当前连接的临时模式编号，也可以用 `pg_is_other_temp_schema(oid)` 排除其他临时模式。两条查询按编号或名称直接查模式目录。 [用法](MANUAL.md#建表) · [测试报告](test-report.md#temp-schema-inspection-20261126)
+
 ## 2026-11-26 · 查询当前模式
 
 当查找顺序优先使用 `pg_temp` 时，`current_schema` 会在需要时创建当前连接的临时模式。查已有模式时只复制模式目录。首次创建时只登记这条可撤销的记录，写入也只需编码模式目录。 [测试报告](test-report.md#temp-schema-scoped-publication-20261126) · [性能报告](performance-report-2026-10-30.md#temp-schema-scoped-publication-cost-20261126)

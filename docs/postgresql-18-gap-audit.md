@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 支持查询临时模式编号和归属
+
+`pg_my_temp_schema()` 及 `pg_is_other_temp_schema(oid)` 支持临时模式检查。正在使用的模式按实际目录编号判断，回滚后恢复连接状态。缺少编号和空参数分别按 PostgreSQL 的规则处理。`CAT-03`、`QRY-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#temp-schema-inspection-20261126) · [性能对照](performance-report-2026-10-30.md#temp-schema-inspection-cost-20261126)
+
 ## 2026-11-26 · 写入临时模式时只编码模式目录
 
 `current_schema` 首次启用临时模式时，仍核对整套目录文件的版本，只为模式目录生成要写入的数据。其他文件已有独立改动时会保留这些待写入的内容，由原操作处理。检测到目录文件版本冲突时，继续用原有的全目录校验。`CAT-03`、`QRY-01` 和 `WAL-08` 仍为部分实现。 [测试报告](test-report.md#temp-schema-scoped-publication-20261126) · [性能报告](performance-report-2026-10-30.md#temp-schema-scoped-publication-cost-20261126)

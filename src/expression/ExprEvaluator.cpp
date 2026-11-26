@@ -6592,6 +6592,36 @@ struct SqlTableVisibilityFunction {
         return ExprValue("boolean", *visible ? "t" : "f");
     }
 };
+struct SqlTemporarySchemaFunction {
+    bool otherSession;
+
+    ExprValue operator()(const std::vector<ExprValue>&) const {
+        throw DbError("XX000", "temporary schema inspection requires its database context");
+    }
+
+    ExprValue invoke(const std::vector<ExprValue>& args, StorageEngine& engine,
+                     const std::string& database) const {
+        const auto* session = currentSession();
+        const auto& db = database.empty() && session ? session->currentDB : database;
+        const auto own = activeTemporarySchema(session && session->currentDB == db ? session : nullptr);
+        if (!otherSession) {
+            if (!args.empty()) throw DbError("42883", "pg_my_temp_schema requires no arguments");
+            const auto row = engine.catalogService().namespaceIdentity(db, own);
+            const Oid oid = row ? row->oid : INVALID_OID;
+            ExprValue result("oid", std::to_string(oid));
+            result.objectOid = oid;
+            return result;
+        }
+        if (args.size() != 1) throw DbError("42883", "pg_is_other_temp_schema requires one oid argument");
+        const auto& input = args.front();
+        if (input.isNull) return ExprValue("boolean", "", true);
+        const Oid oid = input.objectOid ? *input.objectOid : parseOidInput(input.value);
+        const auto row = engine.catalogService().namespaceIdentity(db, oid);
+        const bool other = row && row->nspname != own &&
+            (row->nspname.rfind("pg_temp_", 0) == 0 || row->nspname.rfind("pg_toast_temp_", 0) == 0);
+        return ExprValue("boolean", other ? "t" : "f");
+    }
+};
 struct SqlRoleNameFunction {
     ExprValue operator()(const std::vector<ExprValue>&) const {
         throw DbError("XX000", "pg_get_userbyid requires its catalog context");
@@ -6693,6 +6723,8 @@ bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback
         return callback && callback->target<SqlSerialSequenceFunction>();
     if (name == "pg_table_is_visible")
         return callback && callback->target<SqlTableVisibilityFunction>();
+    if (name == "pg_my_temp_schema" || name == "pg_is_other_temp_schema")
+        return callback && callback->target<SqlTemporarySchemaFunction>();
     if (name == "pg_get_userbyid")
         return callback && callback->target<SqlRoleNameFunction>();
     if (name == "format_type")
@@ -6784,7 +6816,11 @@ const std::vector<ScalarSignature>& scalarSignatures(const std::string& name) {
         return *value;
     }
     if(name=="pg_get_serial_sequence"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text","text"},"text"}}; return *value; }
-    if (name == "pg_table_is_visible") {
+    if (name == "pg_my_temp_schema") {
+        static const auto* const signatures = new const std::vector<ScalarSignature>{{{}, "oid"}};
+        return *signatures;
+    }
+    if (name == "pg_table_is_visible" || name == "pg_is_other_temp_schema") {
         static const auto* const signatures = new const std::vector<ScalarSignature>{
             {{"oid"}, "boolean"}};
         return *signatures;
@@ -8180,6 +8216,9 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         } else if (const auto* visibility = it->second.target<SqlTableVisibilityFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = visibility->invoke(args, *owner, currentDB_);
+        } else if (const auto* temporarySchema = it->second.target<SqlTemporarySchemaFunction>()) {
+            auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
+            result = temporarySchema->invoke(args, *owner, currentDB_);
         } else if (const auto* user = it->second.target<SqlRoleNameFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = user->invoke(args, *owner);
@@ -14181,6 +14220,10 @@ void ExprEvaluator::registerStatelessBuiltins() {
     functions_["pg_get_serial_sequence"]=SqlSerialSequenceFunction{};
     functions_["pg_table_is_visible"] = SqlTableVisibilityFunction{};
     volatility_["pg_table_is_visible"] = 's';
+    functions_["pg_my_temp_schema"] = SqlTemporarySchemaFunction{false};
+    volatility_["pg_my_temp_schema"] = 's';
+    functions_["pg_is_other_temp_schema"] = SqlTemporarySchemaFunction{true};
+    volatility_["pg_is_other_temp_schema"] = 's';
     functions_["pg_get_userbyid"] = SqlRoleNameFunction{};
     volatility_["pg_get_userbyid"] = 's';
     functions_["format_type"] = SqlFormatTypeFunction{};

@@ -1057,6 +1057,14 @@ CREATE TABLE t (ID INT) WITH (FILLFACTOR = 90);
 
 执行 `SET search_path = pg_temp, public` 后，`SELECT current_schema` 会按需创建当前连接的临时模式并返回名称。把 `public` 放在前面时，查询返回 `public`。回滚首次初始化的事务会撤销这次创建。 [当前模式测试](test-report.md#current-schema-temp-20261126) · [回滚与重启测试](test-report.md#temp-schema-scoped-publication-20261126)
 
+用 `SELECT pg_catalog.pg_my_temp_schema()` 查询当前连接的临时模式编号。尚未启用时返回 0。下面的语句列出可保留的模式，包括当前连接自己的临时模式。 [验证记录](test-report.md#temp-schema-inspection-20261126)
+
+```sql
+SELECT nspname FROM pg_catalog.pg_namespace
+WHERE NOT pg_catalog.pg_is_other_temp_schema(oid)
+ORDER BY nspname;
+```
+
 ### 修改表
 
 用 `ALTER TABLE ... RENAME COLUMN` 改列名时，已有的检查约束和生成列表达式会使用新列名。比如把 `"数量"` 改成 `"订购数量"` 后，正数检查和用数量计算的列仍会生效。双引号保留大小写，`"D"` 和 `d` 可以是不同的列。[改名和回滚测试](test-report.md#rename-quoted-column-references-20261122)

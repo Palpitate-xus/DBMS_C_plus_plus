@@ -12,6 +12,8 @@
 
 当 `pg_temp` 是查找顺序里第一项可用的模式时，求值 `current_schema` 可以初始化它。只读事务也可执行此查询。首次初始化随事务回滚，查询的输出类型仍为 `name`。回滚只删除本次新建的目录记录，已经存在的旧库记录保留原编号。 [当前模式测试](test-report.md#current-schema-temp-20261126) · [旧库与回滚测试](test-report.md#temp-namespace-row-undo-20261126)
 
+`pg_my_temp_schema()` 返回当前连接已启用的临时模式编号，类型为 `oid`。尚未启用或首次启用已回滚时返回 0。`pg_is_other_temp_schema(oid)` 对其他临时模式返回 true，对当前连接的模式、普通模式及不存在的编号返回 false。空参数返回空值。两个函数只读目录。 [协议用例](test-report.md#temp-schema-inspection-20261126)
+
 ## 2026-11-24 · 系统目录函数的返回类型
 
 查询绑定到内置 `format_type`、`pg_get_indexdef`、`pg_get_constraintdef` 或 `pg_get_expr` 时，执行沿用该调用确定的结果类型。明确使用 `pg_catalog` 的调用保留内置函数的文本结果。未指定模式的调用按搜索路径及参数类型选择函数。 [测试报告](test-report.md#bound-catalog-results-20261124)

@@ -661,6 +661,16 @@ std::optional<PgNamespaceRow> CatalogManager::getNamespaceByName(
     return row ? std::make_optional(*row) : std::nullopt;
 }
 
+std::optional<PgNamespaceRow> CatalogManager::readNamespace(const std::string& path, Oid oid) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.getNamespace(oid);
+}
+
+std::optional<PgNamespaceRow> CatalogManager::readNamespace(const std::string& path, const std::string& name) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.getNamespaceByName(name);
+}
+
 std::optional<PgNamespaceRow> CatalogManager::getTempNamespace(uint64_t sessionId) const {
     return getNamespaceByName("pg_temp_" + std::to_string(sessionId));
 }

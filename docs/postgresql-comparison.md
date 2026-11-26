@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 查询临时模式的编号和归属
+
+PostgreSQL 的 `pg_my_temp_schema()` 返回当前连接自己的编号。`pg_is_other_temp_schema(oid)` 可按编号排除其他临时模式，也识别 PostgreSQL 用于存放大字段的临时模式名称。SQLite 用 `PRAGMA database_list` 列出当前连接的数据库，DuckDB 提供 `duckdb_schemas()` 查询模式。 [PostgreSQL 18.6 判断源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L3442-L3509) · [SQLite 数据库列表](https://sqlite.org/pragma.html#pragma_database_list) · [DuckDB 1.4 模式目录](https://duckdb.org/docs/1.4/sql/meta/duckdb_table_functions#duckdb_schemas)
+
+本项目支持两条 SQL 调用，并经实际连接对照参数、编号类型和保存点回滚。项目重启或连接退出会清理自己的临时模式记录，PostgreSQL 可以留下空模式供以后复用。项目的临时表也没有单独的 TOAST 模式。 [测试报告](test-report.md#temp-schema-inspection-20261126) · [PostgreSQL 清理源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L4321-L4348)
+
 ## 2026-11-26 · 按连接识别临时模式
 
 PostgreSQL 18.6 在首次使用临时模式时才初始化它，按连接记录是否已经初始化。SQLite 在首次创建临时表时才创建临时数据库文件。DuckDB 把临时表放在当前连接的 `temp.main` 中。 [PostgreSQL 18.6 初始化源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L4133-L4252) · [SQLite 临时数据库](https://sqlite.org/tempfiles.html#temp_databases) · [DuckDB 1.4 临时表](https://duckdb.org/docs/1.4/sql/statements/create_table#temporary-tables)

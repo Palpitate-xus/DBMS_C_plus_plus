@@ -63,6 +63,26 @@ static void test_storage_only_metadata_is_not_imported() {
     std::cout << "[CATALOG-SVC] storage-only metadata stays outside catalog OK" << std::endl;
 }
 
+static void test_namespace_point_reads() {
+    const std::string db = testDbPath("catalog_namespace_point");
+    cleanup(db);
+    dbms::StorageEngine engine;
+    assert(engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    auto& service = engine.catalogService();
+    const auto oid = service.get(db).createTempNamespace(1234);
+    assert(service.persistAll(db));
+    service.evict(db);
+
+    const auto byName = service.namespaceIdentity(db, "pg_temp_1234");
+    const auto byOid = service.namespaceIdentity(db, oid);
+    assert(byName && byName->oid == oid);
+    assert(byOid && byOid->nspname == "pg_temp_1234");
+    assert(!service.namespaceIdentity(db, "pg_temp_1235"));
+    assert(!service.namespaceIdentity(db, dbms::INVALID_OID));
+    assert(!service.has(db));
+    cleanup(db);
+}
+
 static void test_checkpoint_persists_catalog() {
     std::string db = testDbPath("catalog_service_t2");
     cleanup(db);
@@ -251,6 +271,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_bootstrap_and_cache();
     test_storage_only_metadata_is_not_imported();
+    test_namespace_point_reads();
     test_checkpoint_persists_catalog();
     test_legacy_pg_class_prefix_still_loads();
     std::cout << "[CATALOG-SVC] all passed" << std::endl;

@@ -67,6 +67,8 @@ public:
     // Owned namespace rows, with the transaction and publication checks used
     // by metadataSnapshot. The complete public snapshot remains unchanged.
     std::vector<PgNamespaceRow> namespaceSnapshot(const std::string& dbname) const;
+    std::optional<PgNamespaceRow> namespaceIdentity(const std::string& dbname, Oid oid) const;
+    std::optional<PgNamespaceRow> namespaceIdentity(const std::string& dbname, const std::string& name) const;
     std::pair<Oid, std::string> resolveRegclass(const std::string& database, std::optional<Oid> oid,
         const std::string& input, const Session* session, bool textInput = false) const;
     std::optional<bool> relationIsVisible(const std::string& dbname, Oid oid,

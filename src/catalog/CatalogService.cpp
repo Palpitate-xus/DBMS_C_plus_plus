@@ -823,6 +823,22 @@ CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::str
     return CatalogManager::readMetadataSnapshot(catalog.path, includeDefaultObjects);
 }
 
+std::optional<PgNamespaceRow> CatalogService::namespaceIdentity(const std::string& dbname, Oid oid) const {
+    if (dbname.empty() || !oid) return {};
+    const auto catalog = readCatalog(dbname);
+    if (catalog.manager) return catalog.manager->getNamespace(oid);
+    if (catalog.path.empty()) return {};
+    return CatalogManager::readNamespace(catalog.path, oid);
+}
+
+std::optional<PgNamespaceRow> CatalogService::namespaceIdentity(const std::string& dbname, const std::string& name) const {
+    if (dbname.empty() || name.empty()) return {};
+    const auto catalog = readCatalog(dbname);
+    if (catalog.manager) return catalog.manager->getNamespaceByName(name);
+    if (catalog.path.empty()) return {};
+    return CatalogManager::readNamespace(catalog.path, name);
+}
+
 std::pair<Oid, std::string> CatalogService::resolveRegclass(const std::string& database,
     std::optional<Oid> oid, const std::string& input, const Session* session, bool textInput) const {
     const auto ownership = database.empty() ? StorageEngine::CatalogReadOwnership{}

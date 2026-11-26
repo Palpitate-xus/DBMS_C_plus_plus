@@ -12,6 +12,7 @@ def check_temporary_schema(client, sock):
     missing = "SELECT 'pg_temp.no_such_table'::text::regclass"
     wire.command("SET search_path=public,pg_temp", "SET")
     wire.query("SELECT current_schema AS n", rows=[("public",)], fields=[("n", 19)])
+    wire.query("SELECT pg_my_temp_schema() AS oid", rows=[("0",)], fields=[("oid", 26)])
     wire.query(missing, state="3F000", tag=None)
     wire.command("CREATE TABLE public.current_schema_error_probe(i integer)", "CREATE TABLE")
     wire.command("INSERT INTO public.current_schema_error_probe VALUES(0)", "INSERT 0 1")
@@ -41,11 +42,16 @@ def check_temporary_schema(client, sock):
             mode.check(sql, frames, rows=[(value,)], fields=[("n", 19)], ready=ready)
             mode.query(f"SELECT nspname FROM pg_namespace WHERE nspname='{value}'",
                        rows=[(value,)], fields=[("nspname", 19)], ready=ready)
+            mode.query("SELECT oid=pg_my_temp_schema() AS same FROM pg_namespace "
+                       f"WHERE nspname='{value}'",
+                       rows=[("t",)], fields=[("same", 16)], ready=ready)
             return value
 
         def removed(name, ready=b"I"):
             wire.query(f"SELECT nspname FROM pg_namespace WHERE nspname='{name}'",
                        rows=[], fields=[("nspname", 19)], tag="SELECT 0", ready=ready)
+            wire.query("SELECT pg_my_temp_schema() AS oid",
+                       rows=[("0",)], fields=[("oid", 26)], ready=ready)
 
         wire.command("BEGIN READ ONLY", "BEGIN", ready=b"T")
         name = initialize(wire, "current_schema", ready=b"T")
@@ -82,6 +88,58 @@ def check_temporary_schema(client, sock):
         wire.command("DROP TABLE public.current_schema_error_probe", "DROP TABLE")
 
 
+def check_temp_inspection(client, sock, connect):
+    owner = Wire(client, sock)
+    mine = "SELECT pg_catalog.pg_my_temp_schema() AS n"
+    other = "SELECT pg_catalog.pg_is_other_temp_schema({}) AS v"
+
+    def schema_oid(wire):
+        frames = wire.send_statements(mine)
+        rows = client.data_row_values(frames)
+        assert len(rows) == 1 and rows[0][0], frames
+        oid = int(rows[0][0])
+        wire.check(mine, frames, rows=[(str(oid),)], fields=[("n", 26)])
+        return oid
+
+    owner_oid = schema_oid(owner)
+    assert owner_oid > 0
+    for extended in (False, True):
+        wire = Wire(client, sock, extended)
+        for argument, expected in ((str(owner_oid), "f"), ("11", "f"), ("0", "f"),
+                                   ("'4294967295'", "f"), ("NULL", None)):
+            wire.query(other.format(argument), rows=[(expected,)], fields=[("v", 16)])
+        wire.query(other.format("'not-an-oid'"), state="22P02", tag=None)
+        wire.query(other.format("'11'::text"), state="42883", tag=None)
+        wire.query("SELECT pg_my_temp_schema(0)", state="42883", tag=None)
+    frames = owner.exchange(owner.parse(mine) + owner.bind(result_format=1) +
+                            owner.describe_portal() + owner.execute() + owner.packet(b"S"))
+    assert client.data_row_values(frames) == [[struct.pack("!I", owner_oid)]], frames
+    assert [(field[3], field[-1]) for field in client.row_description_fields(frames)] == [(26, 1)], frames
+
+    with connect() as second:
+        peer = Wire(client, second)
+        assert schema_oid(peer) == 0
+        peer.query(other.format(owner_oid), rows=[("t",)], fields=[("v", 16)])
+        peer.command("CREATE TEMP TABLE temp_inspection_peer(k integer)", "CREATE TABLE")
+        peer_oid = schema_oid(peer)
+        assert peer_oid > 0 and peer_oid != owner_oid
+        peer.command("DROP TABLE pg_temp.temp_inspection_peer", "DROP TABLE")
+        assert schema_oid(peer) == peer_oid
+        peer.query(other.format(peer_oid), rows=[("f",)], fields=[("v", 16)])
+        sql = other.format("$1")
+        statement = b"temp_schema_owner_probe"
+        frames = owner.exchange(owner.parse(sql, statement) + owner.packet(b"D", b"S" + statement + b"\0")
+                                + owner.packet(b"S"))
+        assert b"".join(kind for kind, _ in frames) == b"1tTZ", frames
+        assert frames[1][1] == struct.pack("!HI", 1, 26), frames
+        for oid, expected in ((peer_oid, b"\x01"), (owner_oid, b"\x00"), (None, None)):
+            arg = None if oid is None else str(oid).encode()
+            frames = owner.exchange(owner.bind(statement, (arg,), result_format=1) +
+                                    owner.describe_portal() + owner.execute() + owner.packet(b"S"))
+            assert client.data_row_values(frames) == [[expected]], frames
+            assert [(field[3], field[-1]) for field in client.row_description_fields(frames)] == [(16, 1)], frames
+
+
 def main():
     root=Path(__file__).resolve().parents[1]
     spec=importlib.util.spec_from_file_location('sql_value_runner',root/'tests/compat/pg_diff_runner.py')
@@ -97,6 +155,20 @@ def main():
     else:
         server=runner.start_ours(client)
         sock=server['sock'];user='alice';database='info'
+
+    def connect():
+        address = (host, port) if reference else ("127.0.0.1", server["port"])
+        peer = socket.create_connection(address, timeout=runner.wire_timeout())
+        try:
+            if reference:
+                client.startup_reference(peer, user, database, password=password)
+            else:
+                client.startup(peer, user, database)
+        except BaseException:
+            peer.close()
+            raise
+        return peer
+
     checked=0;failures=[];created=[]
 
     def check(sql,rows=None,oids=None,names=None,state=None,describe=False):
@@ -164,6 +236,7 @@ def main():
         if result[1] is None:created.append('sql_value_keyword_text_schema')
         check('SELECT sql_value_keyword_text_schema()',[["public"]],[25])
         check_temporary_schema(client, sock)
+        check_temp_inspection(client, sock, connect)
         print('SQL_VALUE_KEYWORD_COMPLETE',checked,'FAILED',len(failures),failures,flush=True)
         assert not failures,failures
     finally:

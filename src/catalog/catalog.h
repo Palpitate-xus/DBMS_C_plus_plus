@@ -91,6 +91,8 @@ public:
     const PgNamespaceRow* findNamespaceByName(const std::string& name) const;
     std::optional<PgNamespaceRow> getNamespace(Oid oid) const;
     std::optional<PgNamespaceRow> getNamespaceByName(const std::string& name) const;
+    static std::optional<PgNamespaceRow> readNamespace(const std::string& path, Oid oid);
+    static std::optional<PgNamespaceRow> readNamespace(const std::string& path, const std::string& name);
     bool dropNamespace(Oid oid);
     bool renameNamespace(Oid oid, const std::string& name);
     std::vector<PgNamespaceRow> listNamespaces() const;
