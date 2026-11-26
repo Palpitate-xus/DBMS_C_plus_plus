@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>库里表多时，改表名更快 · 2026-11-26</summary>
+
+在内存文件系统上，测试库多了 512 张表后，改一张表名的耗时从约 360–530 毫秒降到约 290–330 毫秒。
+
+[测试报告](docs/test-report.md#table-rename-caches-20261126) · [性能报告](docs/performance-report-2026-10-30.md#table-rename-caches-cost-20261126)
+
+</details>
+
+<details>
 <summary>库里表多时，开始事务更快 · 2026-11-26</summary>
 
 在额外建了 512 张表的测试库里，开始事务从约 3 毫秒降到不到 1 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>列注释多时，按主键查一行更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 列注释多时，按主键查一行更快
 
 在额外写了 4,096 条列注释的测试库里，按主键查一行从约 26 毫秒降到约 8.4 毫秒。
 
 [测试报告](docs/test-report.md#description-publication-20261126) · [性能报告](docs/performance-report-2026-10-30.md#description-publication-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 按编号统计注释时少读数据
 

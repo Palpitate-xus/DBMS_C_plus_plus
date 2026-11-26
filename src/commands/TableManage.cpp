@@ -25248,19 +25248,15 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     if (!tableExists(dbname, oldName)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredRelationName(newName)) return DBStatus::INVALID_VALUE;
     if (tableExists(dbname, newName)) return DBStatus::TABLE_ALREADY_EXISTS;
-    std::string conflictingRelationName;
     const auto relationDirectory = relationDir(dbname, oldName).lexically_normal();
-    for (const auto& existingName : getTableNames(dbname)) {
+    auto names = getTableNames(dbname);
+    for (const auto& existingName : names) {
         if (existingName != oldName &&
             relationHeapNamesOverlap(newName, existingName) &&
             relationDir(dbname, existingName).lexically_normal() ==
                 relationDirectory) {
-            conflictingRelationName = existingName;
-            break;
+            return DBStatus::INVALID_VALUE;
         }
-    }
-    if (!conflictingRelationName.empty()) {
-        return DBStatus::INVALID_VALUE;
     }
     // Always acquire the two relation locks in name order.  Rename is a
     // multi-relation operation; a canonical order prevents two concurrent
@@ -25283,8 +25279,34 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         return DBStatus::IO_ERROR;
     }
 
-    // Cache teardown can flush a fork. Plan moves against the final directory.
-    closeDatabaseCaches(dbname);
+    TableSchema renamedSchema = getTableSchema(dbname, oldName);
+    // Teardown can flush a fork, so evict before enumerating the files.
+    // A plain table rename leaves the database and WAL directories in place.
+    // Keep the open WAL owner and caches of other tables in that database.
+    if (renamedSchema.partitionType == TableSchema::PartitionType::None &&
+        oldName.find('#') == std::string::npos && newName.find('#') == std::string::npos) {
+        evictTableResetCaches(dbname, renamedSchema, relationRoot);
+        TableSchema destination;
+        destination.tablename = newName;
+        evictTableResetCaches(dbname, destination, relationRoot);
+        {
+            std::lock_guard<std::mutex> lock(seqCacheMutex_);
+            seqFileCache_.erase(dbname + "/" + oldName);
+            seqFileCache_.erase(dbname + "/" + newName);
+        }
+        {
+            std::lock_guard<std::mutex> lock(deadTupleMutex_);
+            deadTupleCounts_.erase({dbname, oldName});
+            deadTupleCounts_.erase({dbname, newName});
+        }
+        {
+            std::lock_guard<std::mutex> lock(modifyMutex_);
+            modifyCounts_.erase({dbname, oldName});
+            modifyCounts_.erase({dbname, newName});
+        }
+    } else {
+        closeDatabaseCaches(dbname);
+    }
     std::vector<std::filesystem::path> relationFiles;
     const auto filesStatus = collectRelationFiles(
         *this, dbname, relationRoot, oldName, relationFiles);
@@ -25369,6 +25391,10 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         specializedIndexDirtyPath(*this, dbname, oldName), renameError);
     if (renameError) return DBStatus::IO_ERROR;
 
+    // This file is shared by the database and the cache does not check for
+    // changes published by a different engine. Read the current definitions
+    // before rewriting names.
+    invalidateExclusionCache(dbname);
     const std::vector<ExclusionConstraint> originalExclusions =
         getExclusionConstraints(dbname, "");
     std::vector<ExclusionConstraint> renamedExclusions = originalExclusions;
@@ -25425,7 +25451,6 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         return DBStatus::IO_ERROR;
     }
 
-    TableSchema renamedSchema = getTableSchema(dbname, oldName);
     renamedSchema.tablename = newName;
 
     // Foreign keys persist the referenced relation by name.  Rename every
@@ -25451,23 +25476,20 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         bytes = output.str();
         return true;
     };
-    for (const auto& tableName : getTableNames(dbname)) {
+    for (const auto& tableName : names) {
         if (tableName == oldName) continue;
-        const TableSchema originalSchema = getTableSchema(dbname, tableName);
-        TableSchema updatedSchema = originalSchema;
-        bool changed = false;
-        for (size_t fkIndex = 0; fkIndex < updatedSchema.fkLen(); ++fkIndex) {
-            if (updatedSchema.fks[fkIndex].refTable != oldName) continue;
-            updatedSchema.fks[fkIndex].refTable = newName;
-            changed = true;
-        }
-        if (!changed) continue;
+        TableSchema schema = getTableSchema(dbname, tableName);
+        const auto end = schema.fks.end();
+        const auto first = std::find_if(schema.fks.begin(), end,
+            [&](const ForeignKey& fk) { return fk.refTable == oldName; });
+        if (first == end) continue;
         ReferencingSchemaRewrite rewrite;
         rewrite.tableName = tableName;
-        if (!serializeSchema(originalSchema, rewrite.original) ||
-            !serializeSchema(updatedSchema, rewrite.renamed)) {
-            return DBStatus::IO_ERROR;
+        if (!serializeSchema(schema, rewrite.original)) return DBStatus::IO_ERROR;
+        for (auto fk = first; fk != end; ++fk) {
+            if (fk->refTable == oldName) fk->refTable = newName;
         }
+        if (!serializeSchema(schema, rewrite.renamed)) return DBStatus::IO_ERROR;
         referencingSchemaRewrites.push_back(std::move(rewrite));
     }
 
@@ -25527,7 +25549,6 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     }
 
     // Update table list
-    auto names = getTableNames(dbname);
     bool foundOldName = false;
     for (auto& name : names) {
         if (name != oldName) continue;
@@ -25549,25 +25570,6 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     // error must leave auxiliary records attached to the name that exists.
     commentGuard.commit();
     securityLabelGuard.commit();
-
-    // Update caches: remove old keys, keep new files on disk for lazy open
-    std::string oldKey = dbname + "/" + oldName;
-    pkIndexCache_.erase(oldKey);
-    pageAllocators_.erase(oldKey);
-    {
-        std::vector<std::string> keysToRemove;
-        for (const auto& p : secondaryIndexCache_) {
-            if (p.first.rfind(oldKey + "/", 0) == 0) keysToRemove.push_back(p.first);
-        }
-        for (const auto& k : keysToRemove) secondaryIndexCache_.erase(k);
-    }
-    {
-        std::vector<std::string> keysToRemove;
-        for (const auto& p : hashIndexCache_) {
-            if (p.first.rfind(dbname + "/" + oldName + "/", 0) == 0) keysToRemove.push_back(p.first);
-        }
-        for (const auto& k : keysToRemove) hashIndexCache_.erase(k);
-    }
 
     // Permission and grant-chain records use the relation name as their
     // second whitespace-delimited field.  Replacing an arbitrary substring

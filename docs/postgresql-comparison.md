@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 普通表改名
+
+PostgreSQL 在持有目标关系锁时更新目录里的表名及其行类型名，数据文件不随名称改动。SQLite 在 `sqlite_schema` 中重写表定义和引用，表内容保持原样。DuckDB 在事务中修改目录，改名可以回滚，依赖它的视图需要单独更新。 [PostgreSQL 18.6 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L4022-L4102) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html) · [DuckDB ALTER TABLE](https://duckdb.org/docs/1.5/sql/statements/alter_table)
+
+本项目的文件名仍包含表名。这次保留了同一数据库的写入日志和其他表的缓存，仍通过整库备份保护改名。普通表编号、外键、视图和保存点已对照。普通表目前缺少 PostgreSQL 为每张表建立的行类型。 [功能测试](test-report.md#table-rename-caches-20261126) · [性能报告](performance-report-2026-10-30.md#table-rename-caches-cost-20261126)
+
 ## 2026-11-26 · 复用表定义和依赖记录
 
 PostgreSQL 在 `pg_depend` 保存对象之间的依赖，用于 `DROP RESTRICT` 和 `DROP CASCADE`，并在提交后让其他进程更新目录缓存。SQLite 使用数据库头里的模式版本识别表结构变化。DuckDB 允许在一个写入进程中缓存目录并通过多版本控制处理并发。 [PostgreSQL 依赖目录](https://www.postgresql.org/docs/18/catalog-pg-depend.html) · [PostgreSQL 缓存更新](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/cache/inval.c) · [SQLite 文件格式](https://www.sqlite.org/fileformat2.html#schema_cookie) · [DuckDB 并发](https://duckdb.org/docs/1.5/connect/concurrency)

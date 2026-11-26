@@ -3,6 +3,15 @@
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
 
+<a id="table-rename-caches-20261126"></a>
+## 2026-11-26 · 表改名、回滚和文件移动后的故障
+
+在 PostgreSQL 18.6、上一版和本次构建上执行同一组 SQL。改名前后保持同一个表编号，保存点撤销改名后可用原名读数据。视图和外键继续保护被引用的表，`DROP ... RESTRICT` 均返回 `2BP01`。另测了同名冲突、外键的级联更新、改名之后通过视图读取，以及回退保存点后仍能提交先前写入的邻表数据。另一个对照确认 PostgreSQL 保留并重命名表自己的行类型，两版本项目都在 `pg_class.reltype` 返回 0，`pg_type` 没有对应记录。 [PostgreSQL 改名实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L4022-L4102)
+
+在目标数据文件已移动、表名清单还未发布时，分别让清单发布返回一次 `EIO`，以及强制终止数据库进程。写入失败返回已存在的 `XX000` 错误。进程崩溃后用正常服务器重启同一数据目录。两种情况下都核对了原表名清单、目标表数据和主键文件的字节、邻表读取，以及重试改名和更新邻表。旧版在内存文件系统上通过两种核对，新版在内存文件系统和 ext4 上都通过。
+
+本次构建 SHA-256 为 `38656d97afe61a6e5eb456985cc88f9bef9aa9dfd5a7a1c7998b590dd5975e20`。13 个定向协议用例通过，覆盖已提交和未提交改名的重启、临时表、外部表空间、序列、事务锁和保存点。16 个 C++ 用例通过，涵盖改名前后的写入日志身份、旧名重用、外键动作、索引、分区和进程强制退出后的恢复。新增断言检查另一个引擎实例写入的排除约束能随表改名并继续生效。开发中的第一版缓存了旧定义，该断言失败。上一版和本次构建都通过该断言。 [重启回归](../tests/cold_start_transaction_backup_protocol_e2e_test.py) · [日志身份回归](../tests/heap_wal_table_generation_crash_test.cpp) · [表空间回归](../tests/tablespace_protocol_e2e_test.py) · [排除约束回归](../tests/exclude_test.cpp) · [性能报告](performance-report-2026-10-30.md#table-rename-caches-cost-20261126)
+
 <a id="relation-publication-20261126"></a>
 ## 2026-11-26 · 表定义和依赖记录的保存与恢复
 
