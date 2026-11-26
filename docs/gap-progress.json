@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-26 limit temporary-schema serialization to namespace rows",
+      "gap_ids": ["CAT-03", "QRY-01", "WAL-08"],
+      "status": "partial",
+      "evidence": ["src/catalog/catalog.cpp", "src/expression/ExprEvaluator.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/temp_namespace_test.cpp", "tests/sql_value_keyword_protocol_e2e_test.py"],
+      "verification": [
+        "Verify namespace-only publication keeps unrelated dirty rows unflushed and refuses a changed peer generation.",
+        "Check rollback, savepoints, original namespace identity on old databases and restart cleanup.",
+        "Compare initialization and read timings with the previous build and PostgreSQL 18.6."
+      ]
+    },
+    {
       "issue": "2026-11-26 replace database snapshots with temporary namespace undo",
       "gap_ids": ["CAT-03", "QRY-01", "WAL-08"],
       "status": "partial",

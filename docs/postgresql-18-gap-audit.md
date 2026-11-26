@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 写入临时模式时只编码模式目录
+
+`current_schema` 首次启用临时模式时，仍核对整套目录文件的版本，只为模式目录生成要写入的数据。其他文件已有独立改动时会保留这些待写入的内容，由原操作处理。检测到目录文件版本冲突时，继续用原有的全目录校验。`CAT-03`、`QRY-01` 和 `WAL-08` 仍为部分实现。 [测试报告](test-report.md#temp-schema-scoped-publication-20261126) · [性能报告](performance-report-2026-10-30.md#temp-schema-scoped-publication-cost-20261126)
+
 ## 2026-11-26 · 缩短首次创建临时模式的耗时
 
 `current_schema` 创建临时模式时只登记对应的撤销操作。回滚时用实际编号核对并移除新建记录，重启时沿用现有的临时对象清理。首次初始化的数据库级锁仍会影响其他连接。`CAT-03`、`QRY-01` 和 `WAL-08` 维持部分实现。 [测试报告](test-report.md#temp-namespace-row-undo-20261126) · [性能对照](performance-report-2026-10-30.md#temp-namespace-row-undo-cost-20261126)

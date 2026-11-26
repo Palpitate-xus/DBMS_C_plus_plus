@@ -2999,7 +2999,7 @@ CatalogManager::ConstraintIdentities CatalogManager::readConstraintIdentities(co
     return catalog.constraintIdentities(relation, referenced, constraint);
 }
 
-std::map<std::string, std::string> CatalogManager::serializeAllLocked() const {
+std::map<std::string, std::string> CatalogManager::serializeAllLocked(bool namespacesOnly) const {
     std::map<std::string, std::string> images;
     auto persist = [&](const char* name,
                        const std::function<void(std::ostream&)>& writer) {
@@ -3019,6 +3019,7 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked() const {
             writeOid(out, r.nspowner); out << '\n';
         }
     });
+    if (namespacesOnly) return images;
 
     // pg_class
     persist("class", [&](std::ostream& out) {
@@ -3271,7 +3272,11 @@ CatalogManager::PersistResult CatalogManager::persistCurrent() {
     return persistAllImpl(false);
 }
 
-CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace) {
+bool CatalogManager::persistNamespaces() {
+    return persistAllImpl(false, true) == PersistResult::Published;
+}
+
+CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace, bool namespacesOnly) {
     std::error_code pathError;
     const auto catalogPath = std::filesystem::weakly_canonical(dbPath_, pathError);
     if (pathError) return PersistResult::Failed;
@@ -3280,7 +3285,12 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace)
         return writer.contended() ? PersistResult::Busy : PersistResult::Failed;
     std::lock_guard<std::mutex> lock(mutex_);
     std::lock_guard<std::mutex> publicationLock(persistence_->publication->mutex);
-    auto images = serializeAllLocked();
+    auto images = serializeAllLocked(namespacesOnly);
+    // A namespace-only write still checks the entire generation. The full
+    // publisher owns missing-file repair and peer reload, if either is needed.
+    if (namespacesOnly && !persistence_->baseline.count("namespace"))
+        return PersistResult::RefreshRequired;
+    const auto& catalogFiles = namespacesOnly ? persistence_->baseline : images;
     std::map<std::string, CatalogFileGeneration> current;
     bool peerChanged = false;
     bool missingImage = false;
@@ -3289,7 +3299,7 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace)
     CatalogDirectoryScan directory(dbPath_);
     const bool useDirectoryFd = directory.valid();
 #endif
-    for (const auto& image : images) {
+    for (const auto& image : catalogFiles) {
         auto& generation = current[image.first];
 #if defined(__linux__) && defined(O_PATH)
         const bool inspected = useDirectoryFd
@@ -3311,6 +3321,7 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace)
 #if defined(__linux__) && defined(O_PATH)
     if (useDirectoryFd && !directory.stillNamesDirectory()) return PersistResult::Failed;
 #endif
+    if (namespacesOnly && (peerChanged || missingImage)) return PersistResult::RefreshRequired;
     if (peerChanged) {
         // No cross-cache merge is implied: retain unsaved local changes on a
         // conflict, rather than silently publishing over newer peer metadata.

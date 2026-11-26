@@ -295,6 +295,9 @@ public:
     // Service-owned rows can stay leased after a peer publishes new files.
     // Publish this model or tell the service to load a separate replacement.
     PersistResult persistCurrent();
+    // On a checked catalog generation, publish namespace rows only.
+    // Other pending rows remain owned by their original caller.
+    bool persistNamespaces();
     void loadAll();
     enum class PublicationState { Current, CleanPeerChange, Conflict };
     // Pure serialized-model/generation check. This does not reload rows or
@@ -433,8 +436,8 @@ private:
 
     // 辅助函数
     std::string catalogFilePath(const std::string& tablename) const;
-    std::map<std::string, std::string> serializeAllLocked() const;
-    PersistResult persistAllImpl(bool reloadInPlace);
+    std::map<std::string, std::string> serializeAllLocked(bool namespacesOnly = false) const;
+    PersistResult persistAllImpl(bool reloadInPlace, bool namespacesOnly = false);
     void loadAllLocked();
     void rebuildIndexes();
     static std::string classNameKey(Oid nspOid, const std::string& relname);

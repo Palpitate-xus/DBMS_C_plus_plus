@@ -7686,7 +7686,7 @@ ExprValue ExprEvaluator::evalSqlValue(const FunctionCallExpr* e,const RowContext
                             return current.persistAll();
                         });
                         *created = catalog.createTempNamespace(session->pid);
-                        if (!*created || !catalog.persistAll())
+                        if (!*created || (!catalog.persistNamespaces() && !catalog.persistAll()))
                             throw DbError("58030", "could not publish temporary schema");
                     }
                     engine->noteTemporaryObjectAccess(database);

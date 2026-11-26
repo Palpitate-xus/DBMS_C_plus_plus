@@ -10,6 +10,8 @@ PostgreSQL 18.6 在首次使用临时模式时才初始化它，按连接记录�
 
 PostgreSQL 在事务或子事务结束时分别处理临时模式的状态。DuckDB 将临时表与连接绑定，SQLite 把临时表放在独立的临时数据库里。本项目现在只登记待撤销的临时模式记录，实例重启后由现有的临时对象清理流程移除孤立记录。首次初始化仍持有目录写入的数据库级锁，事务结束前，其他连接读取普通表也可能等锁超时。 [PostgreSQL 18.6 回滚源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L4245-L4319) · [DuckDB 1.4 临时表](https://duckdb.org/docs/1.4/sql/statements/create_table#temporary-tables) · [SQLite 临时数据库](https://sqlite.org/tempfiles.html#temp_databases) · [性能报告](performance-report-2026-10-30.md#temp-namespace-row-undo-cost-20261126)
 
+PostgreSQL 创建模式时向带索引的 `pg_namespace` 插入一行。本项目使用模式目录文件，确认整套目录文件仍是当前版本后，只为这次写入编码模式记录。检查发现目录文件缺失或已被其他连接替换时，沿用完整的目录校验和写入流程。 [PostgreSQL 18.6 模式写入](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/pg_namespace.c#L67-L92) · [本项目性能报告](performance-report-2026-10-30.md#temp-schema-scoped-publication-cost-20261126)
+
 ## 2026-11-26 · 表名前带上数据库名
 
 PostgreSQL 将 `数据库名.模式名.表名` 中的数据库名与当前连接的数据库核对，再在指定模式中找表。显式文本转换和未定型字面量对缺失模式使用不同的错误码。SQLite 可以通过两段名称指定主库、临时库或附加数据库。DuckDB 支持分别指定目录和模式。 [PostgreSQL 18.6 名称查找源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L417-L504) · [PostgreSQL 18.6 转换源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/regproc.c#L817-L856) · [SQLite 对象名称](https://sqlite.org/lang_naming.html) · [DuckDB 1.4.2 目录查找源码](https://github.com/duckdb/duckdb/blob/v1.4.2/src/catalog/catalog.cpp#L395-L433)

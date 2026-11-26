@@ -8,7 +8,7 @@
 
 ## 2026-11-26 · 查询当前模式
 
-当查找顺序优先使用 `pg_temp` 时，`current_schema` 会在需要时创建当前连接的临时模式。查已有模式时只复制模式目录，首次创建时只登记这条可撤销的记录，省去整库备份。 [测试报告](test-report.md#temp-namespace-row-undo-20261126) · [性能报告](performance-report-2026-10-30.md#temp-namespace-row-undo-cost-20261126)
+当查找顺序优先使用 `pg_temp` 时，`current_schema` 会在需要时创建当前连接的临时模式。查已有模式时只复制模式目录。首次创建时只登记这条可撤销的记录，写入也只需编码模式目录。 [测试报告](test-report.md#temp-schema-scoped-publication-20261126) · [性能报告](performance-report-2026-10-30.md#temp-schema-scoped-publication-cost-20261126)
 
 ## 2026-11-26 · 首次使用时创建临时模式
 

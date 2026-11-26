@@ -3,6 +3,7 @@
 
 #include "catalog/catalog.h"
 #include "catalog/systables.h"
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -60,6 +61,48 @@ int main() {
     // 幂等性：再次删除不存在的会话不应出错
     assert(!mgr.dropTempNamespace(1001));
     std::cout << "[TEMP] idempotent drop OK\n";
+
+    assert(mgr.persistAll());
+    PgClassRow pending;
+    pending.relname = "pending_table";
+    pending.relnamespace = mgr.getNamespaceByName("public")->oid;
+    pending.relkind = 'r';
+    const Oid pendingOid = mgr.createClass(pending);
+    const Oid publishedNamespace = mgr.createTempNamespace(1003);
+    assert(mgr.persistNamespaces());
+    assert(mgr.hasUnpublishedChanges());
+    const auto partial = CatalogManager::readMetadataSnapshot(dbPath);
+    assert(std::any_of(partial.namespaces.begin(), partial.namespaces.end(),
+                       [&](const auto& row) { return row.oid == publishedNamespace; }));
+    assert(std::none_of(partial.relations.begin(), partial.relations.end(),
+                        [&](const auto& row) { return row.oid == pendingOid; }));
+    assert(mgr.persistAll());
+
+    const auto classFile = std::filesystem::path(dbPath) / "pg_class.cat";
+    assert(std::filesystem::remove(classFile));
+    mgr.createTempNamespace(1005);
+    assert(!mgr.persistNamespaces());
+    assert(!std::filesystem::exists(classFile));
+    assert(mgr.persistAll());
+    const auto repaired = CatalogManager::readMetadataSnapshot(dbPath);
+    assert(std::any_of(repaired.relations.begin(), repaired.relations.end(),
+                       [&](const auto& row) { return row.oid == pendingOid; }));
+    assert(std::any_of(repaired.namespaces.begin(), repaired.namespaces.end(),
+                       [](const auto& row) { return row.nspname == "pg_temp_1005"; }));
+
+    {
+        CatalogManager peer(dbPath);
+        assert(peer.renameClass(pendingOid, "changed_by_peer"));
+        assert(peer.persistAll());
+        mgr.createTempNamespace(1004);
+        assert(!mgr.persistNamespaces());
+        const auto unchanged = CatalogManager::readMetadataSnapshot(dbPath);
+        assert(std::none_of(unchanged.namespaces.begin(), unchanged.namespaces.end(),
+                            [](const auto& row) { return row.nspname == "pg_temp_1004"; }));
+        assert(std::any_of(unchanged.relations.begin(), unchanged.relations.end(),
+                           [](const auto& row) { return row.relname == "changed_by_peer"; }));
+    }
+    std::cout << "[TEMP] namespace-only publication checks the whole file generation\n";
 
     std::filesystem::remove_all(dbPath);
     std::cout << "[TEMP] all passed\n";

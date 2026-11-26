@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>启用临时模式时减少目录处理 · 2026-11-26</summary>
+
+首次启用临时模式时，数据库省去了重新整理表和列信息的步骤。在多建了 128 张表的测试库里，用时从约 16–18 毫秒降到约 14–15 毫秒。
+
+[使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#temp-schema-scoped-publication-20261126) · [性能报告](docs/performance-report-2026-10-30.md#temp-schema-scoped-publication-cost-20261126)
+
+</details>
+
+<details>
 <summary>首次查询临时模式更快 · 2026-11-26</summary>
 
 用 `current_schema` 首次启用临时模式时，数据库省去了整库备份。在多建了 128 张表的测试库里，这步从约 108 毫秒降到约 17 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查找不存在的临时表时，错误提示更准确 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 查找不存在的临时表时，错误提示更准确
 
 查临时表的编号时，报错会区分当前连接还没创建过临时表或序列，还是已经创建过但找不到指定的表。
 
 [使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#lazy-temp-namespace-20261126) · [性能报告](docs/performance-report-2026-10-30.md#lazy-temp-namespace-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 查表编号时可以带上当前数据库名
 
