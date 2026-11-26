@@ -6,6 +6,10 @@
 
 截至 2026-11-26，273 项功能要求中有 22 项完成、170 项部分实现、66 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-26 · 表改列名后，视图可以继续使用原列名
+
+受测普通视图保留原来的输出列名、类型和数据，包括使用 `SELECT *` 的子查询与公用表表达式，以及 `JOIN USING` 和 `NATURAL JOIN`。 [测试报告](test-report.md#rename-view-star-and-join-20261126) · [性能报告](performance-report-2026-10-30.md#rename-view-star-and-join-cost-20261126)
+
 ## 2026-11-26 · 保存恢复记录时少等三次磁盘同步
 
 首次保存用于撤销建表、修改注释或更改普通视图的文件时，临时目录的同步次数从四次降到一次。 [功能测试](test-report.md#undo-stage-sync-20261126) · [性能报告](performance-report-2026-10-30.md#undo-stage-sync-cost-20261126)
@@ -219,7 +223,7 @@
 
 ## 2026-11-22 · 基础表改列名后保留已有视图
 
-依赖已登记的普通视图可以跟随基础表改列名，保留原输出名称。回滚和强制重启会恢复对应版本的表结构及视图定义。连接键及同名表查找仍有受限情形。[测试报告](test-report.md#rename-dependent-views-20261122) · [性能报告](performance-report-2026-10-30.md#rename-dependent-views-cost-20261122)
+依赖已登记的普通视图可以跟随基础表改列名，保留原输出名称。回滚和强制重启会恢复对应版本的表结构及视图定义。 [测试报告](test-report.md#rename-dependent-views-20261122) · [性能报告](performance-report-2026-10-30.md#rename-dependent-views-cost-20261122) · [后续连接验证](test-report.md#rename-view-star-and-join-20261126)
 
 ## 2026-11-22 · 改列名后保留数据检查和计算
 

@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 preserve star projections and named joins in views after table column rename",
+      "gap_ids": ["CAT-07", "CAT-10", "CAT-16", "SQL-11"],
+      "status": "partial",
+      "evidence": ["src/commands/DdlExecutor.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/rename_view_star_and_join_sources.sql", "tests/compat/cases/rename_column_dependent_views.sql", "tests/view_column_dependency_test.cpp"],
+      "verification": [
+        "Compare nested stars, derived tables, CTEs and named joins with PostgreSQL 18.6 in both wire protocols.",
+        "Verify name collisions, savepoints, repeated renames and recovery before and after commit.",
+        "Time rename and subsequent read at two database sizes and include a plain-view control."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 sync the private directory once for the initial metadata undo files",
       "gap_ids": ["BACKUP-01", "TXN-05", "WAL-07"],
       "status": "partial",

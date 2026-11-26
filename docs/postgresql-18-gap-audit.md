@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 表改列名后保留视图的星号输出和连接
+
+对已登记依赖的普通视图，`ALTER TABLE ... RENAME COLUMN` 保留受测星号子查询、CTE、`JOIN USING` 和 `NATURAL JOIN` 的输出与连接键。物化视图、缺少依赖信息的旧定义和视图自身的列改名仍待覆盖。`CAT-07`、`CAT-10`、`CAT-16` 和 `SQL-11` 保持部分实现。 [功能测试](test-report.md#rename-view-star-and-join-20261126) · [性能报告](performance-report-2026-10-30.md#rename-view-star-and-join-cost-20261126)
+
 ## 2026-11-26 · 两份恢复文件共用一次临时目录同步
 
 首次建立建表、注释或普通视图改动的恢复记录时，先写入并同步两个文件，再同步一次临时目录。整组文件发布后仍同步数据库目录。`BACKUP-01`、`TXN-05` 和 `WAL-07` 保持部分实现。 [功能测试](test-report.md#undo-stage-sync-20261126) · [性能报告](performance-report-2026-10-30.md#undo-stage-sync-cost-20261126)
@@ -492,7 +496,7 @@ SQL `PREPARE` 保留原查询。协议 `Parse` 和 SQL 路径均能记录 `IN`�
 
 ## 2026-11-22 · 基础表改列名后查询普通视图
 
-受测的普通视图在改名后保留原来的输出列名、类型和查询结果，视图定义与表结构一起提交或恢复。影响合并连接键及视图源表解析的改名仍有差距。更老的无依赖记录格式和物化视图需另行覆盖，`CAT-07` 与 `CAT-10` 保持部分实现。[测试范围](test-report.md#rename-dependent-views-20261122)
+受测的普通视图在改名后保留原来的输出列名、类型和查询结果，视图定义与表结构一起提交或恢复。随后补齐了受测按同名列连接的场景。源表解析、更老的无依赖记录格式和物化视图需另行覆盖，`CAT-07` 与 `CAT-10` 保持部分实现。 [早期范围](test-report.md#rename-dependent-views-20261122) · [星号与连接验证](test-report.md#rename-view-star-and-join-20261126)
 
 ## 2026-11-22 · 改列名时更新保存的表达式
 

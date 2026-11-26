@@ -1,6 +1,17 @@
 # 更新日志
 
 <details>
+<summary>给表改列名后，原来的报表照常查询 · 2026-11-26</summary>
+
+给原表的列换个名字后，使用已保存视图的报表可以继续按原列名查询。
+
+这一轮覆盖视图内使用 `SELECT *` 的子查询和公用表表达式，以及按同名列连接的常见写法。
+
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#rename-view-star-and-join-20261126) · [性能报告](docs/performance-report-2026-10-30.md#rename-view-star-and-join-cost-20261126)
+
+</details>
+
+<details>
 <summary>改视图注释时少等磁盘 · 2026-11-26</summary>
 
 在额外建了 64 张空表的磁盘测试中，修改视图注释的中位耗时从 47–60 毫秒降到 40–52 毫秒。
@@ -19,16 +30,13 @@
 </details>
 
 <details>
-<summary>可以给视图换个位置 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 可以给视图换个位置
 
 可以把 `sales.monthly` 移到 `archive.monthly`。视图仍然使用原来的数据表，依赖它的查询也能继续运行。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#alter-view-set-schema-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-set-schema-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 可以给视图改名
 

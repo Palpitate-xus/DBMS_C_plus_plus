@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 表改列名后保留依赖视图的列和连接
+
+PostgreSQL 修改目录里的列名，视图规则保存解析过的查询树，能够继续引用原列的位置。SQLite 会改写保存的 SQL 文本，文档指出隐含的 `NATURAL JOIN` 和星号输出可能受改名影响。DuckDB 会更新所涉约束，依赖该列名的视图需要单独处理。 [PostgreSQL 改列名实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L3706-L3742) · [PostgreSQL 视图规则](https://www.postgresql.org/docs/18/rules-views.html) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html#limitations) · [DuckDB RENAME COLUMN](https://duckdb.org/docs/2.0/sql/statements/alter_table#rename-column)
+
+本项目保存 SQL 文本和已记录的依赖。改列名时根据绑定结果保留星号展开的原有输出名，为按同名列连接的输入保留原来的可见列名。重新绑定后核对来源、列位置、输出类型及连接键。 [功能测试](test-report.md#rename-view-star-and-join-20261126) · [性能报告](performance-report-2026-10-30.md#rename-view-star-and-join-cost-20261126)
+
 ## 2026-11-26 · 一次同步两份恢复文件所在的目录
 
 PostgreSQL 先同步写入日志，数据页可以稍后写盘。DuckDB 同样通过检查点把写入日志的内容写回数据库文件。SQLite 的回滚日志模式会在写数据页前同步回滚日志，文档也介绍了复用日志文件以减少目录更新的方法。 [PostgreSQL WAL](https://www.postgresql.org/docs/18/wal-intro.html) · [DuckDB CHECKPOINT](https://duckdb.org/docs/2.0/sql/statements/checkpoint) · [SQLite 持久回滚日志](https://www.sqlite.org/atomiccommit.html#persistent_rollback_journals)

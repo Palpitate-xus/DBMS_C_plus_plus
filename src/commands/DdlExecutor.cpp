@@ -38,6 +38,7 @@
 #include "common/CharacterColumn.h"
 #include "common/IntegerTextCodec.h"
 #include "common/SqlSyntax.h"
+#include "common/SqlTrivia.h"
 #include "process/OutputCapture.h"
 #include "common/GeometryValue.h"
 #include "common/scram_sha256.h"
@@ -11609,6 +11610,13 @@ static std::vector<LegacySequenceDefault> planLegacySequenceDefaults(
     return updates;
 }
 
+static bool isViewProjectionStar(const Expr* expression) {
+    if (const auto* column = dynamic_cast<const ColumnRefExpr*>(expression))
+        return column->column == "*";
+    const auto* literal = dynamic_cast<const LiteralExpr*>(expression);
+    return literal && literal->value == "*";
+}
+
 static ViewRelationDependencies inspectViewBindings(
     const CatalogManager& catalog, const std::string& database,
     const PreparedQuery& query, std::vector<ViewSourceBinding>& references,
@@ -11636,7 +11644,18 @@ static ViewRelationDependencies inspectViewBindings(
             if (onCall) onCall(call);
         });
     for (const auto oid : sequenceDependencies) dependencies.emplace(oid, 0);
-    std::sort(ordered.begin(), ordered.end());
+    for (const auto& [_, fields] : query.projectionBindings) {
+        for (const auto& field : fields) {
+            if (!field.column || !isViewProjectionStar(field.expression)) continue;
+            const auto& binding = *field.column;
+            ordered.emplace_back(ViewEditSpan{field.expression->sourceBegin, field.expression->sourceEnd},
+                ViewSourceBinding{binding.sourceOrdinal, binding.columnOrdinal, binding.scopeDepth});
+        }
+    }
+    // The cells from one star share a span and retain their projection order.
+    std::stable_sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) {
+        return left.first < right.first;
+    });
     references.reserve(ordered.size());
     for (const auto& site : ordered) references.push_back(site.second);
     return dependencies;
@@ -11822,6 +11841,36 @@ static std::vector<ViewRenamePlan> planViewSourceRenames(
     return plans;
 }
 
+static bool viewHasNamedJoin(const FromItem* source) {
+    return source && source->type == FromItem::Type::Join &&
+        (!source->usingCols.empty() || source->joinType.rfind("NATURAL", 0) == 0 ||
+         viewHasNamedJoin(source->left.get()) || viewHasNamedJoin(source->right.get()));
+}
+
+static size_t viewColumnAliasInsertion(const std::string& sql, const FromItem& source,
+                                       const std::vector<bool>& protectedBytes) {
+    const auto beginning = viewTableAliasPosition(sql, source, protectedBytes);
+    if (source.alias.empty()) return beginning;
+    auto at = skipLeadingSqlTrivia(sql, beginning);
+    const auto invalid = [] { return DbError("0A000", "view range alias has no matching source position"); };
+    if (at >= sql.size()) throw invalid();
+    const auto endOfName = [&](size_t position) {
+        return position >= sql.size() || !(std::isalnum(static_cast<unsigned char>(sql[position])) ||
+            static_cast<unsigned char>(sql[position]) >= 128 || sql[position] == '_' || sql[position] == '$');
+    };
+    if (SQLParser::toLower(sql.substr(at, 2)) == "as" && endOfName(at + 2))
+        at = skipLeadingSqlTrivia(sql, at + 2);
+    if (at >= sql.size() || sql.compare(at, source.alias.size(), source.alias) != 0)
+        throw invalid();
+    at += source.alias.size();
+    if (source.columnAliases.empty()) return at;
+    at = skipLeadingSqlTrivia(sql, at);
+    if (at >= sql.size() || sql[at] != '(') throw invalid();
+    for (++at; at < sql.size(); ++at)
+        if (!protectedBytes[at] && sql[at] == ')') return at;
+    throw invalid();
+}
+
 static std::vector<ViewRenamePlan> planDependentViewRenames(
     CatalogManager& catalog, const std::string& database,
     const PgClassRow& relation, const PgAttributeRow& attribute,
@@ -11865,15 +11914,61 @@ static std::vector<ViewRenamePlan> planDependentViewRenames(
                             [&](const auto& field) { return field.name == newName; });
                 });
         };
-        const auto updateReference = [&](const ColumnRefExpr& ref) {
-            const auto& binding = *ref.binding;
-            const auto& source = prepared.sourceRanges.at(binding.sourceOrdinal);
-            const auto& column = source.columns.at(binding.columnOrdinal);
-            const bool target = source.relationSchema == schema->nspname &&
+        const auto renamedInput = [&](const PreparedQuery::SourceRange& source, size_t index) {
+            const auto& column = source.columns.at(index);
+            return source.relationSchema == schema->nspname &&
                 source.relationName == relation.relname &&
                 (column.physicalAttributeNumber == attribute.attnum ||
                  (column.physicalAttributeNumber == 0 && column.name == attribute.attname)) &&
-                (!source.source || binding.columnOrdinal >= source.source->columnAliases.size());
+                (!source.source || index >= source.source->columnAliases.size());
+        };
+        // USING and NATURAL resolve join keys by the visible input names.
+        // Preserve those names at the affected FROM occurrence before binding
+        // the unchanged join again. The underlying relation still uses the
+        // new name, at the same column position.
+        std::map<size_t, std::string> pinnedAliases;
+        std::optional<std::vector<bool>> protectedBytes;
+        for (const auto& source : prepared.sourceRanges) {
+            const auto* select = dynamic_cast<const SelectStmt*>(source.owner);
+            const auto* item = source.source;
+            if (!select || !item || item->type != FromItem::Type::Table ||
+                source.relationName != relation.relname || source.relationSchema != schema->nspname ||
+                !viewHasNamedJoin(select->fromClause.get())) continue;
+            size_t column = item->columnAliases.size();
+            while (column < source.columns.size() && !renamedInput(source, column)) ++column;
+            if (column == source.columns.size()) continue;
+            std::string alias = source.name;
+            if (item->alias.empty() && std::count_if(prepared.sourceRanges.begin(), prepared.sourceRanges.end(),
+                    [&](const auto& other) { return other.owner == source.owner && other.name == source.name; }) > 1) {
+                alias = "__view_source_" + std::to_string(source.ordinal);
+                while (std::any_of(prepared.sourceRanges.begin(), prepared.sourceRanges.end(),
+                    [&](const auto& other) { return other.name == alias; })) alias += '_';
+            }
+            std::string insertion = item->alias.empty() ? " AS " + quote(alias) : std::string{};
+            insertion += item->columnAliases.empty() ? "(" : ", ";
+            for (size_t index = item->columnAliases.size(); index <= column; ++index) {
+                if (index != item->columnAliases.size()) insertion += ", ";
+                insertion += quote(source.columns[index].name);
+            }
+            if (item->columnAliases.empty()) insertion += ')';
+            if (!protectedBytes) protectedBytes = sqlProtectedBytes(plan.query);
+            const auto at = viewColumnAliasInsertion(plan.query, *item, *protectedBytes);
+            edit(at, at, insertion);
+            pinnedAliases.emplace(source.ordinal, std::move(alias));
+        }
+        const auto renamedColumn = [&](const QueryColumnBinding& binding) {
+            return !pinnedAliases.count(binding.sourceOrdinal) &&
+                renamedInput(prepared.sourceRanges.at(binding.sourceOrdinal), binding.columnOrdinal);
+        };
+        const auto updateReference = [&](const ColumnRefExpr& ref) {
+            const auto& binding = *ref.binding;
+            const auto& source = prepared.sourceRanges.at(binding.sourceOrdinal);
+            if (const auto pinned = pinnedAliases.find(source.ordinal); pinned != pinnedAliases.end()) {
+                if (!ref.table.empty() && (!ref.schema.empty() || pinned->second != ref.table))
+                    edit(ref.sourceBegin, ref.sourceEnd, quote(pinned->second) + "." + quote(ref.column));
+                return;
+            }
+            const bool target = renamedColumn(binding);
             // A different unqualified input with the new name must keep its
             // binding even if the renamed table now exposes the same name.
             if (!target && (ref.column != newName || !ref.table.empty() || source.name.empty()))
@@ -11919,6 +12014,52 @@ static std::vector<ViewRenamePlan> planDependentViewRenames(
                 const auto* column = static_cast<const ColumnRefExpr*>(target.expr.get());
                 edit(target.sourceExpressionEnd, target.sourceExpressionEnd,
                      " AS " + quote(column->column));
+            }
+        }
+        // Expand a star that exposes the changed input name. Keep each
+        // original output label so a parent SELECT or CTE keeps its columns.
+        for (const auto& [select, fields] : prepared.projectionBindings) {
+            // A plain top-level star already gets its column labels from the
+            // view catalog. Keeping it avoids adding expressions to hot reads.
+            if (select == prepared.ast.get() && select->selectList.size() == 1 &&
+                dynamic_cast<const LiteralExpr*>(select->selectList.front().expr.get()) &&
+                select->fromClause && select->fromClause->type == FromItem::Type::Table &&
+                select->fromClause->columnAliases.empty() && select->ctes.empty() &&
+                !select->whereClause && select->groupBy.empty() && select->groupByElems.empty() &&
+                !select->having && select->orderBy.empty() && select->distinctOn.empty() &&
+                select->setOp == SetOp::None && !select->hasRowCountClause && select->locking.empty())
+                continue;
+            for (auto first = fields.begin(); first != fields.end();) {
+                const auto* expression = first->expression;
+                const auto last = std::find_if(first + 1, fields.end(), [&](const auto& field) {
+                    return field.expression != expression;
+                });
+                if (isViewProjectionStar(expression) && std::any_of(first, last, [&](const auto& field) {
+                        return field.column && renamedColumn(*field.column);
+                    })) {
+                    std::string replacement;
+                    for (auto field = first; field != last; ++field) {
+                        if (!field->column)
+                            throw DbError("0A000", "view star has an unbound output column");
+                        const auto& binding = *field->column;
+                        const auto& source = prepared.sourceRanges.at(binding.sourceOrdinal);
+                        const auto& column = source.columns.at(binding.columnOrdinal);
+                        if (!replacement.empty()) replacement += ", ";
+                        if (!source.mergedUsing && !source.name.empty()) {
+                            if (!source.schema.empty()) replacement += quote(source.schema) + ".";
+                            replacement += quote(source.name) + ".";
+                        }
+                        if (renamedColumn(binding)) replacement += quote(newName) + " AS " + quote(column.name);
+                        else replacement += quote(column.name);
+                    }
+                    edit(expression->sourceBegin, expression->sourceEnd, replacement);
+                } else if (const auto* star = dynamic_cast<const ColumnRefExpr*>(expression);
+                           star && star->column == "*" && first->column) {
+                    const auto pinned = pinnedAliases.find(first->column->sourceOrdinal);
+                    if (pinned != pinnedAliases.end() && (!star->schema.empty() || pinned->second != star->table))
+                        edit(star->sourceBegin, star->sourceEnd, quote(pinned->second) + ".*");
+                }
+                first = last;
             }
         }
         plan.output = prepared.output;

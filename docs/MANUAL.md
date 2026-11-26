@@ -2318,7 +2318,7 @@ SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
 
 查询可以把普通视图与表或另一普通视图连接起来。例如 `SELECT v.total, o.status FROM order_totals v JOIN orders o ON v.id = o.id` 会按订单号匹配金额和状态。受支持的连接视图可以直接输出查询结果，省去写临时表的步骤。[验证范围](test-report.md#join-ordinary-views-20261122)
 
-普通表改列名后，受支持的普通视图仍会读取同一列，并保留创建视图时的输出列名。比如订单表的 `quantity` 改成 `order_quantity` 后，查询原视图仍可使用 `quantity`。若改名会改变连接键或绑定到另一张表，数据库会撤销这次改名。[验证范围](test-report.md#rename-dependent-views-20261122)
+普通表改列名后，受支持的普通视图仍读取同一列，也保留创建视图时的输出列名。比如订单表的 `quantity` 改成 `order_quantity` 后，查询原视图仍可使用 `quantity`。这也适用于受测的 `SELECT *` 子查询、公用表表达式、`JOIN USING` 和 `NATURAL JOIN`。如果无法核实改名仍引用原来的列和连接键，数据库会撤销这次改名。 [早期验证](test-report.md#rename-dependent-views-20261122) · [星号与连接验证](test-report.md#rename-view-star-and-join-20261126)
 
 普通视图的 `CREATE OR REPLACE` 保留既有列名、类型和类型修饰符，允许末尾追加
 列；不兼容替换返回 `42P16` 并保留旧定义。创建时静态绑定输出，不提前执行
