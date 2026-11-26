@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 一次同步两份恢复文件所在的目录
+
+PostgreSQL 先同步写入日志，数据页可以稍后写盘。DuckDB 同样通过检查点把写入日志的内容写回数据库文件。SQLite 的回滚日志模式会在写数据页前同步回滚日志，文档也介绍了复用日志文件以减少目录更新的方法。 [PostgreSQL WAL](https://www.postgresql.org/docs/18/wal-intro.html) · [DuckDB CHECKPOINT](https://duckdb.org/docs/2.0/sql/statements/checkpoint) · [SQLite 持久回滚日志](https://www.sqlite.org/atomiccommit.html#persistent_rollback_journals)
+
+本项目先逐一同步恢复记录和事务信息文件，随后同步一次两者所在的临时目录，最后将目录移到恢复程序会查找的位置并同步数据库目录。这个流程用于首次建立这类恢复文件，涵盖事务内建表、添加注释和单独给普通视图改名或移动。 [功能测试](test-report.md#undo-stage-sync-20261126) · [性能报告](performance-report-2026-10-30.md#undo-stage-sync-cost-20261126)
+
 ## 2026-11-26 · 改视图时只保存会变动的文件
 
 PostgreSQL 修改视图所在模式时更新关系目录、模式依赖和行类型，重启按预写日志重放修改。SQLite 的回滚日志在写入数据库前保存涉及页面的旧内容。DuckDB 用预写日志记录提交，由检查点把日志内容写回数据库文件。 [PostgreSQL 视图迁移实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L17829-L17910) · [PostgreSQL WAL](https://www.postgresql.org/docs/18/wal-intro.html) · [SQLite 原子提交](https://www.sqlite.org/atomiccommit.html#creating_a_rollback_journal_file) · [DuckDB CHECKPOINT](https://duckdb.org/docs/2.0/sql/statements/checkpoint)

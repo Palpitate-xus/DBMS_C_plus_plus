@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 sync the private directory once for the initial metadata undo files",
+      "gap_ids": ["BACKUP-01", "TXN-05", "WAL-07"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/create_table_undo_ownership_test.cpp", "tests/alter_view_set_schema_protocol_e2e_test.py", "tests/prepared_transaction_test.cpp"],
+      "verification": [
+        "Fail the file and directory barriers before metadata mutation and verify rollback and retry.",
+        "Stop the process both before and after installing the undo directory and verify startup recovery.",
+        "Count directory sync calls and compare end-to-end latency on two filesystems."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 back up only changed files for standalone ALTER VIEW renames and moves",
       "gap_ids": ["BACKUP-01", "TXN-05", "WAL-07"],
       "status": "partial",

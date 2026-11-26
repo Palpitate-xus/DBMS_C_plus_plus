@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
 #include <filesystem>
@@ -17,6 +19,7 @@
 #include <spawn.h>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <thread>
@@ -32,6 +35,10 @@ using namespace dbms;
 thread_local struct stat interruptedCatalog {};
 thread_local bool interruptCatalogUnlink = false;
 thread_local unsigned interruptedUnlinks = 0;
+enum class StageSync { Off, Observe, FailHeader, FailDirectory };
+thread_local StageSync stageSync = StageSync::Off;
+thread_local unsigned stageDirectorySyncs = 0;
+thread_local unsigned stageSyncFailures = 0;
 
 bool failCatalogUnlink(int parent, const char* file) noexcept {
     if (!interruptCatalogUnlink) return false;
@@ -60,6 +67,36 @@ extern "C" int remove(const char* file) noexcept {
     static const auto realRemove = reinterpret_cast<Remove>(::dlsym(RTLD_NEXT, "remove"));
     if (!realRemove) std::abort();
     return realRemove(file);
+}
+
+extern "C" int fsync(int fd) noexcept {
+    if (stageSync != StageSync::Off) {
+        char descriptor[64];
+        char path[PATH_MAX];
+        std::snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", fd);
+        const auto length = ::readlink(descriptor, path, sizeof(path));
+        if (length > 0) {
+            const std::string_view name(path, static_cast<size_t>(length));
+            const auto stage = name.find("/.create_table_undo.stage.");
+            if (stage != std::string_view::npos) {
+                const auto member = name.find('/', stage + 1);
+                if (member == std::string_view::npos) ++stageDirectorySyncs;
+                const bool failDirectory = stageSync == StageSync::FailDirectory &&
+                    member == std::string_view::npos;
+                const bool failHeader = stageSync == StageSync::FailHeader &&
+                    member != std::string_view::npos &&
+                    (name.substr(member) == "/header" ||
+                     name.substr(member).rfind("/.dbms_atomic_header.", 0) == 0);
+                if (failDirectory || failHeader) {
+                    stageSync = StageSync::Off;
+                    ++stageSyncFailures;
+                    errno = EIO;
+                    return -1;
+                }
+            }
+        }
+    }
+    return static_cast<int>(::syscall(SYS_fsync, fd));
 }
 
 namespace {
@@ -136,6 +173,45 @@ void checkUnrelatedDirectory(const std::string& database,
 }
 
 enum class ResumeRetirement { PartialFiles, EmptyDirectory, StandaloneProof, LegacyProof, Backup };
+
+void checkInitialPublication(StorageEngine& owner, const std::string& database) {
+    const fs::path home = database;
+    const auto before = read(home / "tlist.lst");
+    const auto catalog = read(home / "pg_catalog" / "pg_class.cat");
+    for (const auto fault : {StageSync::FailHeader, StageSync::FailDirectory, StageSync::Observe}) {
+        require(owner.beginTransaction(database) == DBStatus::OK, "begin stage test transaction");
+        require(owner.beginCreateTableUndo(database), "acquire stage test ownership");
+        stageSyncFailures = stageDirectorySyncs = 0;
+        stageSync = fault;
+        const auto result = owner.createTable(database, table("stage_target"));
+        stageSync = StageSync::Off;
+        if (fault == StageSync::Observe) {
+            require(result == DBStatus::OK, "retry publishes and creates the table");
+            require(stageDirectorySyncs == 1, "sync the private directory once for both files");
+            owner.registerDdlUndo([&owner, database] {
+                return owner.dropTable(database, "stage_target") == DBStatus::OK;
+            });
+        } else {
+            if (stageSyncFailures != 1 || result != DBStatus::IO_ERROR) {
+                std::cerr << "stage sync fault=" << static_cast<int>(fault)
+                          << " failures=" << stageSyncFailures << " status="
+                          << static_cast<int>(result) << '\n';
+            }
+            require(stageSyncFailures == 1 && result == DBStatus::IO_ERROR,
+                    "a failed stage sync propagates before table creation");
+            require(!fs::exists(home / ".create_table_undo"), "failed stage did not publish");
+            for (const auto& entry : fs::directory_iterator(home)) {
+                require(entry.path().filename().string().rfind(".create_table_undo.stage.", 0) != 0,
+                        "failed stage was removed");
+            }
+        }
+        require(owner.rollbackTransaction() == DBStatus::OK, "rollback stage test transaction");
+        require(!owner.tableExists(database, "stage_target") &&
+                read(home / "tlist.lst") == before &&
+                read(home / "pg_catalog" / "pg_class.cat") == catalog,
+                "rollback preserves preexisting table metadata");
+    }
+}
 
 void checkInterruptedRetirement(const std::string& database, ResumeRetirement resume) {
     const fs::path home = database;
@@ -272,6 +348,7 @@ void worker() {
         }
         require(owner.commentOnTable(database, "existing", "before") == DBStatus::OK,
                 "initial comment");
+        checkInitialPublication(owner, database);
 
         for (bool commit : {false, true}) {
             const std::string mine = commit ? "owner_committed" : "owner_rolled_back";
@@ -372,7 +449,7 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "--worker") {
             worker();
-            std::cout << "[CREATE UNDO OWNERSHIP] concurrent writes, interrupted retirement and unrelated directories passed\n";
+            std::cout << "[CREATE UNDO OWNERSHIP] staging, concurrent writes and interrupted retirement passed\n";
             return 0;
         }
         require(argc == 1, "unexpected arguments");

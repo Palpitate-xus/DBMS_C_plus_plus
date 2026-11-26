@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>改视图注释时少等磁盘 · 2026-11-26</summary>
+
+在额外建了 64 张空表的磁盘测试中，修改视图注释的中位耗时从 47–60 毫秒降到 40–52 毫秒。
+
+[测试报告](docs/test-report.md#undo-stage-sync-20261126) · [性能报告](docs/performance-report-2026-10-30.md#undo-stage-sync-cost-20261126)
+
+</details>
+
+<details>
 <summary>给视图改名或换位置更快 · 2026-11-26</summary>
 
 在额外建了 64 张空表的磁盘测试中，单独移动视图的中位耗时从 532–644 毫秒缩短到 67–90 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以给视图改名 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 可以给视图改名
 
 用 `ALTER VIEW` 改名后，依赖这个视图的查询仍能运行，原有注释也会保留。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#alter-view-rename-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-rename-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 改表时少读一遍备份文件
 

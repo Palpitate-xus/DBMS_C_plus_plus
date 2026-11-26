@@ -2322,13 +2322,35 @@ std::filesystem::path makeCreateUndoStage(const std::filesystem::path& database)
     return path;
 }
 
+bool writeSyncedNewFile(const std::filesystem::path& path, std::string_view bytes) {
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    bool ok = true;
+    while (!bytes.empty()) {
+        const auto written = ::write(fd, bytes.data(), bytes.size());
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) {
+            ok = false;
+            break;
+        }
+        bytes.remove_prefix(static_cast<size_t>(written));
+    }
+    if (ok && ::fsync(fd) != 0) ok = false;
+    if (::close(fd) != 0) ok = false;
+    if (!ok) (void)::unlink(path.c_str());
+    return ok;
+}
+
 bool publishCreateUndo(const std::filesystem::path& database, const char* member,
                        const std::string& image, const std::string& header) {
     const auto stage = makeCreateUndoStage(database);
     if (stage.empty()) return false;
     std::error_code error;
-    if (index_file::writeAtomicallyNoReplace(stage / member, image) != index_file::WriteResult::OK ||
-        index_file::writeAtomicallyNoReplace(stage / "header", header) != index_file::WriteResult::OK ||
+    // Recovery sees only the final directory name. Fill the private stage
+    // before syncing its entries and publishing the two files together.
+    if (!writeSyncedNewFile(stage / member, image) ||
+        !writeSyncedNewFile(stage / "header", header) ||
+        !index_file::syncDirectory(stage) ||
         !renameTablespaceEntryNoReplace(stage, database / kCreateUndo, error)) {
         std::filesystem::remove_all(stage, error);
         return false;
@@ -62460,23 +62482,7 @@ static bool writePreparedFileAtomically(const std::filesystem::path& target,
                                         const std::string& contents) {
     const auto parent = target.parent_path();
     const auto temp = target.string() + ".tmp." + std::to_string(::getpid());
-    const int fd = ::open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-    if (fd < 0) return false;
-    bool ok = true;
-    size_t offset = 0;
-    while (offset < contents.size()) {
-        const ssize_t written = ::write(fd, contents.data() + offset,
-                                        contents.size() - offset);
-        if (written <= 0) { ok = false; break; }
-        offset += static_cast<size_t>(written);
-    }
-    if (ok && ::fsync(fd) != 0) ok = false;
-    if (::close(fd) != 0) ok = false;
-    if (!ok) {
-        std::error_code ec;
-        std::filesystem::remove(temp, ec);
-        return false;
-    }
+    if (!writeSyncedNewFile(temp, contents)) return false;
     std::error_code ec;
     std::filesystem::rename(temp, target, ec);
     if (ec) {

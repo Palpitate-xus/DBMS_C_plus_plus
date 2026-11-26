@@ -6,6 +6,10 @@
 
 截至 2026-11-26，273 项功能要求中有 22 项完成、170 项部分实现、66 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-26 · 保存恢复记录时少等三次磁盘同步
+
+首次保存用于撤销建表、修改注释或更改普通视图的文件时，临时目录的同步次数从四次降到一次。 [功能测试](test-report.md#undo-stage-sync-20261126) · [性能报告](performance-report-2026-10-30.md#undo-stage-sync-cost-20261126)
+
 ## 2026-11-26 · 改视图时少备份文件
 
 通过简单查询协议单独给普通视图改名或移动时，只保存会改动的文件，以便失败时恢复。 [功能测试](test-report.md#alter-view-file-undo-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-file-undo-cost-20261126)
