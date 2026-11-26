@@ -52,7 +52,8 @@ struct QueryBindingMetadata {
     // Optional pure assignment-context validation. Never execute a routine,
     // query or source row to infer its type/value. source is null when the
     // descriptor has no direct value-expression leaf (star/set/derived).
-    std::function<void(const QueryOutputColumn&, const Expr*, const std::string&)> assignmentInput;
+    // A checked literal regclass cast can return its resolved relation OID.
+    std::function<std::optional<uint32_t>(const QueryOutputColumn&, const Expr*, const std::string&)> assignmentInput;
     // Canonical query-host role/signature metadata, not a scalar callback.
     // A stored routine with the same spelling must never inherit this role.
     // Appended so existing aggregate initialization keeps its callback roles.

@@ -47,6 +47,43 @@ BASIC_CASES = [
 ]
 
 
+def check_prepared_regclass(wire, is_postgres):
+    sql = ("SELECT attname FROM pg_catalog.pg_attribute "
+           "WHERE attrelid='path_probe'::regclass AND attnum>0")
+    wire.command("CREATE TABLE format_a.path_probe(first_column integer)", "CREATE TABLE")
+    wire.command("CREATE TABLE format_b.path_probe(second_column integer)", "CREATE TABLE")
+    wire.command("SET search_path=format_a,format_b,public", "SET")
+    name = b"format_relation_reference"
+    sync = wire.packet(b"S")
+    frames = wire.exchange(wire.parse(sql, name) + sync)
+    assert b"".join(kind for kind, _ in frames) == b"1Z", frames
+
+    def check(column, ready=b"I"):
+        frames = wire.exchange(wire.bind(name) + wire.describe_portal() + wire.execute() + sync)
+        wire.check(sql, frames, rows=[(column,)], fields=[("attname", 19)], ready=ready)
+
+    check("first_column")
+    wire.command("SET search_path=format_b,format_a,public", "SET")
+    check("second_column")
+    wire.command("SET search_path=format_a,format_b,public", "SET")
+    check("first_column")
+    wire.command("BEGIN", "BEGIN", ready=b"T")
+    wire.command("ALTER TABLE format_a.path_probe RENAME TO moved_probe", "ALTER TABLE", ready=b"T")
+    check("second_column", ready=b"T")
+    wire.command("ROLLBACK", "ROLLBACK")
+    # PostgreSQL can retain the second object's binding after the first
+    # object's name is restored. The local statement binds again at execution.
+    check("second_column" if is_postgres else "first_column")
+    wire.query(sql, rows=[("first_column",)], fields=[("attname", 19)])
+    wire.command("SET search_path=format_b,format_a,public", "SET")
+    check("second_column")
+    wire.command("SET search_path=format_a,format_b,public", "SET")
+    check("first_column")
+    wire.command("SET search_path=public", "SET")
+    frames = wire.exchange(wire.packet(b"C", b"S" + name + b"\0") + sync)
+    assert b"".join(kind for kind, _ in frames) == b"3Z", frames
+
+
 def main():
     review = Review("FORMAT_TYPE_PROTOCOL")
     client, sock = review.client, review.sock
@@ -112,6 +149,9 @@ def main():
                 f"a.attrelid=OID '0x{table_oid:x}'",
                 f"a.attrelid={table_oid}::oid",
                 "a.attrelid='format_a.format_probe'::regclass",
+                "REGCLASS 'format_a.format_probe'=a.attrelid",
+                "a.attrelid=CAST('format_a.format_probe' AS pg_catalog.regclass)::oid",
+                "a.attrelid='format_a.format_probe'::text::regclass",
             ):
                 mode.query(columns_by_oid.format(equality=equality), rows=DECLARATIONS,
                            fields=fields, tag=f"SELECT {len(DECLARATIONS)}")
@@ -120,20 +160,28 @@ def main():
             for value, state in (("CAST('08' AS pg_catalog.oid)", "22P02"),
                                  ("'4294967296'::oid", "22003")):
                 mode.query(columns_by_oid.format(equality=f"a.attrelid={value}"), state=state, tag=None)
+            mode.query(columns_by_oid.format(equality="false AND a.attrelid='format_a.absent'::regclass"),
+                       state="42P01", tag=None)
         review.parameter(columns_by_oid.format(equality="a.attrelid=$1::oid"),
                          [str(table_oid)], [26], [list(row) for row in DECLARATIONS], [19, 25])
+        review.parameter(columns_by_oid.format(equality="a.attrelid=$1::text::regclass"),
+                         ["format_a.format_probe"], [25], [list(row) for row in DECLARATIONS], [19, 25])
         assert not review.failures
         if review.server:
             # An earlier error still belongs to the unfiltered source rows.
             earlier = "1/(CASE WHEN a.attrelid='1249'::oid THEN 0 ELSE 1 END)=1"
             wire.query(columns_by_oid.format(equality=f"{earlier} AND a.attrelid='{table_oid}'::oid"),
                        state="22012", tag=None)
-            sql = columns_by_oid.format(equality=f"a.attrelid='{table_oid}'::oid")
-            frames = wire.send_statements("EXPLAIN (FORMAT JSON, ANALYZE TRUE, TIMING FALSE) " + sql)
-            assert not any(kind == b"E" for kind, _ in frames), frames
-            plan = json.loads("\n".join(row[0].decode() for row in client.data_row_values(frames)))
-            sources = [node["actualRows"] for node in plan_nodes(plan["plan"]) if node["nodeType"] == "TypedSource"]
-            assert plan["actualRows"] == len(DECLARATIONS) and sources == [len(DECLARATIONS) + 6], plan
+            for value in (f"'{table_oid}'::oid", "'format_a.format_probe'::regclass",
+                          "CAST('format_a.format_probe' AS pg_catalog.regclass)::oid"):
+                sql = columns_by_oid.format(equality=f"a.attrelid={value}")
+                frames = wire.send_statements("EXPLAIN (FORMAT JSON, ANALYZE TRUE, TIMING FALSE) " + sql)
+                assert not any(kind == b"E" for kind, _ in frames), frames
+                plan = json.loads("\n".join(row[0].decode() for row in client.data_row_values(frames)))
+                sources = [node["actualRows"] for node in plan_nodes(plan["plan"])
+                           if node["nodeType"] == "TypedSource"]
+                assert plan["actualRows"] == len(DECLARATIONS) and sources == [len(DECLARATIONS) + 6], plan
+        check_prepared_regclass(wire, review.server is None)
 
         display("'format_a.status'::regtype", "format_a.status")
         display("'format_a.status[]'::regtype", "format_a.status[]")
@@ -146,7 +194,12 @@ def main():
         display("'format_a.labels'::regtype", "labels")
         wire.command("CREATE TYPE format_b.int4 AS ENUM ('x')", "CREATE TYPE")
         wire.command("CREATE TYPE format_b.text AS ENUM ('x')", "CREATE TYPE")
+        wire.command("CREATE DOMAIN format_b.regclass AS pg_catalog.text", "CREATE DOMAIN")
         wire.command("SET search_path=format_b,pg_catalog,format_a,public", "SET")
+        wire.query(columns_by_oid.format(equality="a.attrelid='format_a.format_probe'::regclass"),
+                   state="42883", tag=None)
+        wire.query(columns_by_oid.format(equality="a.attrelid='format_a.format_probe'::pg_catalog.regclass"),
+                   rows=DECLARATIONS, fields=fields, tag=f"SELECT {len(DECLARATIONS)}")
         display("23", "integer")
         display("25", "pg_catalog.text")
         display("1009", "pg_catalog.text[]")
@@ -161,6 +214,8 @@ def main():
         display("'format_b.text'::regtype", "format_b.text")
         wire.command("CREATE TEMP TABLE format_temp_probe(id integer)", "CREATE TABLE")
         display("25", "text")
+        wire.query(columns_by_oid.format(equality="a.attrelid='pg_temp.format_temp_probe'::regclass"),
+                   rows=[("id", "integer")], fields=fields)
 
         identity = wire.send_statements("""SELECT 'format_a."Case.Row"'::regtype::oid AS v""")
         oid = client.data_row_values(identity)[0][0].decode()

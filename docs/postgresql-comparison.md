@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 按表名查列时怎样确定对象
+
+PostgreSQL 可以在解析阶段把 `regclass` 字面量转换成实际对象编号，在相关对象变更或搜索路径变化时重新分析已准备的语句。SQLite 执行预编译语句时核对结构版本号。DuckDB 用目录版本与身份识别需要重新绑定的语句。 [PostgreSQL 对象编号类型](https://www.postgresql.org/docs/18/datatype-oid.html) · [PostgreSQL PREPARE](https://www.postgresql.org/docs/18/sql-prepare.html) · [SQLite 结构版本](https://www.sqlite.org/fileformat.html#schema_cookie) · [DuckDB 目录版本检查](https://raw.githubusercontent.com/duckdb/duckdb/v1.4.2/src/main/prepared_statement_data.cpp)
+
+本项目复用当前语句校验字面表名时得到的对象编号，用于已绑定为 `oid` 的等值比较。显式文本转换及参数保留运行时查找。已有预编译语句在同名表改名又回滚后的绑定与 PostgreSQL 存在差异。 [测试](test-report.md#regclass-catalog-filter-20261126) · [性能对照](performance-report-2026-10-30.md#regclass-catalog-cost-20261126)
+
 ## 2026-11-26 · 用表编号缩小列目录的读取范围
 
 PostgreSQL 转换未知类型的字符串时可在解析阶段生成已定型的常量；`pg_attribute` 有按表编号、列序号查找的索引。SQLite 分析 `WHERE` 的比较条件，再为符合条件的项选择索引。DuckDB 的优化器把可预先计算的表达式变成常量。 [PostgreSQL 18.6 类型转换源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_coerce.c) · [PostgreSQL 18.6 列目录声明](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/include/catalog/pg_attribute.h) · [SQLite 条件分析](https://www.sqlite.org/optoverview.html#where_clause_analysis) · [DuckDB 常量折叠源码](https://raw.githubusercontent.com/duckdb/duckdb/v1.4.2/src/optimizer/rule/constant_folding.cpp)

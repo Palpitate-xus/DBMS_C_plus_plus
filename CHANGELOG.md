@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按表名查看列信息更快 · 2026-11-26</summary>
+
+用 `'表名'::regclass` 查询系统目录时，数据库会复用已找到的表编号。在额外建了 32 张表的测试中，列出四列从约 95 毫秒降到约 6 毫秒。
+
+[测试报告](docs/test-report.md#regclass-catalog-filter-20261126) · [性能报告](docs/performance-report-2026-10-30.md#regclass-catalog-cost-20261126)
+
+</details>
+
+<details>
 <summary>按表编号查看列信息更快 · 2026-11-26</summary>
 
 查询系统目录时，写了 `::oid` 或 `CAST` 也能先定位到这张表。在额外建了 32 张表的测试中，列出四列的查询从约 97 毫秒降到约 5 毫秒。八进制编号也能查到正确的列。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>读取表和列的信息时少做重复工作 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 读取表和列的信息时少做重复工作
 
 数据库读取表名、列名等信息时，省掉了准备写回文件的步骤。单独测试这项读取时，耗时减少约三成。
 
 [测试报告](docs/test-report.md#catalog-cold-read-20261124) · [性能报告](docs/performance-report-2026-10-30.md#catalog-cold-read-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 反复查看同一张表的索引更快
 

@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 复用字面表名对应的编号
+
+目录等值比较可复用已通过 `regclass` 输入校验的真实对象编号。仍需运行时求值的表名由原路径处理。已准备语句在恢复同名表后的保留规则与 PostgreSQL 仍有差异。`CAT-03`、`QRY-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#regclass-catalog-filter-20261126) · [性能对照](performance-report-2026-10-30.md#regclass-catalog-cost-20261126)
+
 ## 2026-11-26 · 按转换后的对象编号筛选目录
 
 当等值条件的两侧均使用实际内置 `oid`，可将已经确定有效的编号用于现有的目录筛选路径。引号中的编号由原有输入规则解释，八进制和十六进制的含义一致。依赖目录查找的 `regclass`、参数和运行时表达式仍走各自的求值流程。`CAT-03` 和 `QRY-01` 维持部分实现。 [测试报告](test-report.md#typed-oid-catalog-filter-20261126) · [性能对照](performance-report-2026-10-30.md#typed-oid-catalog-cost-20261126)

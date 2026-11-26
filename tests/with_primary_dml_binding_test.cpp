@@ -44,7 +44,11 @@ int main() {
         {{"first","arg1","integer",{},true,"1",1},{"second","arg2","integer",{},true,"2",2}},metadata);
     assert(parameters.parameters.size()==2 && parameters.uses.size()==2);
     assert(parameters.legacySql().find("CAST('1' AS integer)")!=std::string::npos);
-    metadata.assignmentInput=validateAssignmentInput;
+    metadata.assignmentInput=[](const QueryOutputColumn& target,const Expr* input,const std::string& type)
+        -> std::optional<uint32_t> {
+        validateAssignmentInput(target,input,type);
+        return std::nullopt;
+    };
     metadata.relation=[](const std::string& name) {
         return QueryRelationMetadata{"public",name,{{"id","integer"},{"v","interval"}}, {}};
     };

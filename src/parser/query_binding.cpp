@@ -178,6 +178,7 @@ public:
     std::map<const Expr*,uint32_t> valueTypeOids;
     std::map<const Expr*,DatumTypePtr> valueTypeMetadata;
     std::map<const Expr*,int32_t> valueTypeModifiers;
+    std::map<const Expr*,Oid> literalRelationOids;
     const QueryRowDescriptor* setOrderScope = nullptr;
     // Collect real source occurrences while binding a row-count expression.
     // Nested queries still resolve their own ranges normally. Validation is
@@ -394,6 +395,30 @@ public:
             ? expressionTypeOid(unary->operand.get()) : 0;
     }
 
+    void replaceWithOidConstant(ExprPtr& input, Oid oid) {
+        auto value = std::make_unique<LiteralExpr>();
+        value->typeName = "oid";
+        value->value = std::to_string(oid);
+        value->analyzedPrimitiveConstant = true;
+        value->sourceBegin = input->sourceBegin;
+        value->sourceEnd = input->sourceEnd;
+        valueTypeOids.erase(input.get());
+        valueTypeMetadata.erase(input.get());
+        valueTypeModifiers.erase(input.get());
+        literalRelationOids.erase(input.get());
+        valueTypeOids[value.get()] = 26;
+        input = std::move(value);
+    }
+
+    bool useLiteralRelationOid(ExprPtr& input, const Expr* reference) {
+        const auto bound = literalRelationOids.find(reference);
+        if (bound == literalRelationOids.end()) return false;
+        const Oid oid = bound->second;
+        literalRelationOids.erase(bound);
+        replaceWithOidConstant(input, oid);
+        return true;
+    }
+
     // Both CAST and :: have their own AST shapes. Replace only a proven
     // built-in OID constant, leaving invalid and runtime inputs for the
     // original expression to evaluate at the point of demand.
@@ -409,6 +434,7 @@ public:
                 return;
             operand = cast->left.get();
         }
+        if (useLiteralRelationOid(input, operand)) return;
         const auto* literal = dynamic_cast<const LiteralExpr*>(operand);
         if (!literal || literal->preparedSubquery || literal->arraySubquery ||
             literal->analyzedPrimitiveConstant || (operand != input.get() && !literal->typeName.empty())) return;
@@ -429,17 +455,7 @@ public:
             oid = static_cast<Oid>(number);
         }
 
-        auto value = std::make_unique<LiteralExpr>();
-        value->typeName = "oid";
-        value->value = std::to_string(oid);
-        value->analyzedPrimitiveConstant = true;
-        value->sourceBegin = input->sourceBegin;
-        value->sourceEnd = input->sourceEnd;
-        valueTypeOids.erase(input.get());
-        valueTypeMetadata.erase(input.get());
-        valueTypeModifiers.erase(input.get());
-        valueTypeOids[value.get()] = 26;
-        input = std::move(value);
+        replaceWithOidConstant(input, oid);
     }
 
     int32_t expressionTypeModifier(const Expr* node) const {
@@ -595,7 +611,9 @@ public:
                 target.typeMetadata = type->second;
             }
         }
-        metadata.assignmentInput(target, source, spelling);
+        const auto relation = metadata.assignmentInput(target, source, spelling);
+        if (relation && expressionTypeOid(source) == 2205)
+            literalRelationOids.emplace(source, *relation);
     }
     std::optional<QueryEnumType> enumType(const std::string& spelling,const Expr* node) const {
         return metadata.enumType?metadata.enumType(spelling,expressionTypeOid(node)):std::nullopt;
@@ -1172,6 +1190,13 @@ public:
             const bool typeReference=regtype_cast_detail::reference(leftBase) || regtype_cast_detail::reference(rightBase);
             if((bitOperand || typeReference) && bitComparisons.count(binary->op)) {
                 const auto comparison=ExprEvaluator::resolveComparison(binary->op,left,right);
+                if (binary->op == "=" && !binary->comparison &&
+                    comparison.leftType == "oid" && comparison.rightType == "oid" &&
+                    ((expressionTypeOid(binary->left.get()) == 26 &&
+                      useLiteralRelationOid(binary->right, binary->right.get())) ||
+                     (expressionTypeOid(binary->right.get()) == 26 &&
+                      useLiteralRelationOid(binary->left, binary->left.get()))))
+                    return declaredType("boolean", binary);
                 if(typeReference)binary->comparison=comparison;
                 coerceCaseInput(binary->left,left,comparison.leftType);
                 coerceCaseInput(binary->right,right,comparison.rightType);

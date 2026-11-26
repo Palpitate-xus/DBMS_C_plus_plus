@@ -42251,9 +42251,9 @@ std::string preparedPrimitiveInputType(const std::string& spelling) {
     return found == inputTypes.end() ? std::string{} : found->second;
 }
 
-void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr* source,
+std::optional<Oid> validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr* source,
     const std::string& database,StorageEngine* owner) {
-    if (!source || source->preparedSubquery) return;
+    if (!source || source->preparedSubquery) return {};
     const LiteralExpr* input = nullptr;
     if (!target.name.empty()) {
         // A real assignment column contributes input context only to its
@@ -42272,10 +42272,10 @@ void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr*
         input = dynamic_cast<const LiteralExpr*>(binary->left.get());
         if (input && !input->typeName.empty()) input = nullptr;
     }
-    if (!input || input->preparedSubquery) return;
+    if (!input || input->preparedSubquery) return {};
     const auto literalTokens = SQLParser::tokenize(input->value);
     if (literalTokens.size() != 1 || literalTokens.front().size() < 2 ||
-        literalTokens.front().front() != '\'' || literalTokens.front().back() != '\'') return;
+        literalTokens.front().front() != '\'' || literalTokens.front().back() != '\'') return {};
     if (target.name.empty() && target.typeMetadata &&
         target.typeMetadata->kind == DatumKind::Array &&
         target.typeMetadata->actualOid == target.typeOid &&
@@ -42293,7 +42293,7 @@ void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr*
         // SQL transforms the string through the base input function when
         // binding. The actual domain constraint belongs to execution.
         (void)evaluator.convertArrayDomainBase(domain.baseType, value);
-        return;
+        return {};
     }
     auto type = preparedPrimitiveInputType(target.type);
     auto regtypeSpelling=target.type;
@@ -42303,7 +42303,7 @@ void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr*
     if(CatalogManager::parseQualifiedName(regtypeSpelling,regtypeName,true) &&
        stored_regtype_detail::scalarType(regtypeName.name) && (regtypeName.schema.empty() || regtypeName.schema=="pg_catalog"))
         type=ExprHelper::canonicalResultTypeName(ExprHelper::declaredTypeInput(target.type,database));
-    if (type.empty()) return;
+    if (type.empty()) return {};
     CastExpr conversion;
     auto literal = std::make_unique<LiteralExpr>();
     literal->value = input->value; // exactly one raw SQL string, no typed operand
@@ -42312,7 +42312,8 @@ void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr*
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(database);
     evaluator.bindScalarFunctions(&conversion,owner);
-    (void)evaluator.eval(&conversion, RowContext{});
+    const auto value = evaluator.eval(&conversion, RowContext{});
+    return target.name.empty() && value.typeName == "regclass" ? value.objectOid : std::nullopt;
 }
 } // namespace
 
@@ -43190,7 +43191,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
         metadata.assignmentInput = [&](const QueryOutputColumn& target,
                                       const Expr* source, const std::string& sourceType) {
             validateAssignmentInput(target, source, sourceType);
-            validatePreparedPrimitiveInput(target, source, dbname,const_cast<StorageEngine*>(this));
+            return validatePreparedPrimitiveInput(target, source, dbname,const_cast<StorageEngine*>(this));
         };
         metadata.identityDefault = [&](const std::string& schema,const std::string& name,
                                        const std::string& column)->std::optional<uint32_t> {
