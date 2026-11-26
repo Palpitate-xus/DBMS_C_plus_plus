@@ -42,6 +42,7 @@
 #include "catalog/TypeCatalogScan.h"
 #include "catalog/namespace_catalog.h"
 #include "catalog/description_catalog.h"
+#include "catalog/DescriptionCount.h"
 #include "catalog/systables.h"
 #include "Config.h"
 #include "process/RuntimeStats.h"
@@ -2610,6 +2611,12 @@ struct CompositeSuffixBound {
 
 enum class StoredComparison { Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual };
 
+static const std::map<std::string, StoredComparison> storedComparisons{
+    {"=", StoredComparison::Equal}, {"<>", StoredComparison::NotEqual}, {"!=", StoredComparison::NotEqual},
+    {"<", StoredComparison::Less}, {"<=", StoredComparison::LessEqual},
+    {">", StoredComparison::Greater}, {">=", StoredComparison::GreaterEqual},
+};
+
 struct StoredIntegerField {
     size_t offset, width;
 
@@ -3872,11 +3879,6 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
         if (type == "integer") return 32;
         return 64;
     };
-    static const std::map<std::string, StoredComparison> comparisons{
-        {"=", StoredComparison::Equal}, {"<>", StoredComparison::NotEqual}, {"!=", StoredComparison::NotEqual},
-        {"<", StoredComparison::Less}, {"<=", StoredComparison::LessEqual},
-        {">", StoredComparison::Greater}, {">=", StoredComparison::GreaterEqual},
-    };
     for (const auto* clause : residual) {
         if (!clause || clause->preparedSubquery) return {};
         if (const auto* between = rangePredicateCall(clause)) {
@@ -3918,8 +3920,8 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
             continue;
         }
         const bool equality = op == "=" || op == "<>" || op == "!=";
-        auto comparator = comparisons.find(op);
-        if (comparator == comparisons.end()) return {};
+        auto comparator = storedComparisons.find(op);
+        if (comparator == storedComparisons.end()) return {};
         if (binary->predicateCollation) {
             const auto& rule = *binary->predicateCollation;
             if (rule.indeterminate || rule.selected.usesSystemLocale ||
@@ -3934,7 +3936,7 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
             literal = binary->left.get();
             if (!equality) {
                 const std::string reverseOp = std::string(1, op[0] == '<' ? '>' : '<') + op.substr(1);
-                comparator = comparisons.find(reverseOp);
+                comparator = storedComparisons.find(reverseOp);
             }
         }
         if (!column || (kind == Input::Text && !equality)) return {};
@@ -5483,6 +5485,181 @@ public:
     }
 };
 
+namespace {
+
+struct DescriptionComparison {
+    size_t column;
+    StoredComparison operation;
+    bool reversed;
+    int64_t constant;
+};
+
+using DescriptionPredicates = std::vector<DescriptionComparison>;
+
+const QueryColumnBinding* descriptionColumn(const Expr* expression,
+                                            const PreparedQuery::SourceRange& range) {
+    const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
+    if (!column || column->preparedSubquery || column->generatedRead || !column->binding) return nullptr;
+    const auto& binding = *column->binding;
+    if (binding.scopeDepth || binding.mergedUsing || binding.sourceOrdinal != range.ordinal ||
+        binding.columnOrdinal >= description_catalog::fields.size()) return nullptr;
+    return binding.typeOid == description_catalog::fields[binding.columnOrdinal].type ? &binding : nullptr;
+}
+
+bool bindDescriptionPredicates(const Expr* expression, const PreparedQuery::SourceRange& range,
+                               DescriptionPredicates& predicates) {
+    const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
+    if (!binary || binary->preparedSubquery || binary->rowComparison || binary->predicateCollation) return false;
+    if (binary->op == "AND" && !binary->comparison)
+        return bindDescriptionPredicates(binary->left.get(), range, predicates) &&
+            bindDescriptionPredicates(binary->right.get(), range, predicates);
+
+    const auto operation = storedComparisons.find(binary->op);
+    if (operation == storedComparisons.end()) return false;
+    const auto* column = descriptionColumn(binary->left.get(), range);
+    const bool reversed = !column;
+    if (reversed) column = descriptionColumn(binary->right.get(), range);
+    if (!column || (column->typeOid != 26 && column->typeOid != 23)) return false;
+    const auto* input = reversed ? binary->left.get() : binary->right.get();
+
+    std::optional<int64_t> constant;
+    if (column->typeOid == 26) {
+        if (binary->comparison && (!binary->comparison->strict || binary->comparison->enumTypeOid ||
+            !binary->comparison->collation.empty() || binary->comparison->collationUsesSystemLocale ||
+            binary->comparison->identity != "builtin-comparison:" + binary->op + "(oid,oid)")) return false;
+        constant = catalogOidLiteralValue(input, false);
+    } else if (!binary->comparison && dynamic_cast<const LiteralExpr*>(input)) {
+        // Only direct integer literals participate here. Casts and other
+        // runtime expressions keep the established evaluator and error timing.
+        if (const auto value = compositeLiteralValue(input, "bigint")) {
+            int64_t number;
+            const auto end = value->data() + value->size();
+            const auto parsed = std::from_chars(value->data(), end, number);
+            if (parsed.ec == std::errc{} && parsed.ptr == end) constant = number;
+        }
+    }
+    if (!constant) return false;
+    predicates.push_back({column->columnOrdinal, operation->second, reversed, *constant});
+    return true;
+}
+
+class DescriptionCountOp final : public Operator {
+    StorageEngine& engine_;
+    std::string database_;
+    std::optional<Oid> object_;
+    DescriptionPredicates where_;
+    std::vector<DescriptionPredicates> filters_;
+    std::shared_ptr<PreparedSelectState> state_;
+    RowContext result_;
+    bool emitted_ = false;
+
+    static bool matches(const DescriptionPredicates& predicates, const std::array<int64_t, 3>& keys) {
+        return std::all_of(predicates.begin(), predicates.end(), [&](const auto& predicate) {
+            const auto key = keys[predicate.column];
+            const auto order = (key > predicate.constant) - (key < predicate.constant);
+            return matchesStoredComparison(predicate.operation, predicate.reversed ? -order : order);
+        });
+    }
+
+public:
+    DescriptionCountOp(StorageEngine& engine, const std::string& database, std::optional<Oid> object,
+                       DescriptionPredicates where, std::vector<DescriptionPredicates> filters)
+        : engine_(engine), database_(database), object_(object), where_(std::move(where)),
+          filters_(std::move(filters)) {}
+
+    void bindOutput(std::shared_ptr<PreparedSelectState> state) {
+        if (state->aggregates.size() != filters_.size())
+            throw DbError("XX000", "catalog count lost its aggregate output");
+        state_ = std::move(state);
+    }
+
+    bool open() override {
+        OpenInstrument instrument(this);
+        clearError();
+        close();
+        return true;
+    }
+
+    bool next(std::string& display) override {
+        NextInstrument instrument(this);
+        if (emitted_) return false;
+        checkForQueryInterrupt();
+        const auto rows = engine_.catalogService().descriptionSnapshot(database_, object_);
+        std::vector<int64_t> counts(filters_.size(), 0);
+        if (where_.empty() && std::all_of(filters_.begin(), filters_.end(), [](const auto& filter) {
+                return filter.empty();
+            })) {
+            if (rows.size() > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+                throw DbError("22003", "bigint out of range");
+            std::fill(counts.begin(), counts.end(), static_cast<int64_t>(rows.size()));
+        } else {
+            for (const auto& row : rows) {
+                checkForQueryInterrupt();
+                const std::array<int64_t, 3> keys{row.objoid, row.classoid, row.objsubid};
+                if (!matches(where_, keys)) continue;
+                for (size_t i = 0; i < counts.size(); ++i)
+                    if (matches(filters_[i], keys)) incrementAggregateCount(counts[i]);
+            }
+        }
+        result_ = state_->execution->context(state_->outerRow);
+        for (size_t i = 0; i < counts.size(); ++i) {
+            const auto& column = state_->aggregates[i].column;
+            result_.setBoundColumn(column.sourceOrdinal, column.columnOrdinal,
+                ExprValue("bigint", std::to_string(counts[i])));
+        }
+        display.clear();
+        emitted_ = instrument.emitted = true;
+        return true;
+    }
+
+    void close() override { emitted_ = false; result_ = RowContext{}; }
+    bool supportsPreparedContexts() const override { return true; }
+    bool lastPreparedContext(RowContext& row) const override {
+        if (!emitted_) return false;
+        row = result_;
+        return true;
+    }
+    bool supportsPreparedOuterRow() const override { return true; }
+    bool bindPreparedOuterRow(const RowContext&) override { close(); return true; }
+    std::string preparedPlanNodeName() const override { return "Catalog Count"; }
+    std::map<std::string, std::string> preparedPlanAttributes() const override {
+        auto attributes = std::map<std::string, std::string>{{"relation", description_catalog::name}};
+        if (object_) attributes.emplace("objectOid", std::to_string(*object_));
+        return attributes;
+    }
+};
+
+} // namespace
+
+OpPtr description_catalog::makeCountSource(StorageEngine& engine, const std::string& database,
+                                           const PreparedQuery::SourceRange& range) {
+    const auto* select = dynamic_cast<const SelectStmt*>(range.owner);
+    if (!select || range.source != select->fromClause.get() || range.mergedUsing || range.cteStatement ||
+        range.viewQuery || range.relationSchema != "pg_catalog" || range.relationName != name ||
+        range.columns.size() != fields.size() || !QueryPlanner::supportsStoredCountSelect(*select)) return {};
+    for (size_t i = 0; i < fields.size(); ++i) {
+        const auto& column = range.columns[i];
+        if (column.physicalRelationOid != relationOid || column.physicalAttributeNumber != static_cast<int>(i + 1) ||
+            column.typeOid != fields[i].type || fields[i].nullable) return {};
+    }
+    DescriptionPredicates where;
+    if (select->whereClause && !bindDescriptionPredicates(select->whereClause.get(), range, where)) return {};
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(database);
+    std::vector<DescriptionPredicates> filters;
+    filters.reserve(select->selectList.size());
+    for (const auto& item : select->selectList) {
+        const auto& call = static_cast<const FunctionCallExpr&>(*item.expr);
+        if (evaluator.hasScalarFunction(&call, &engine)) return {};
+        const auto* argument = call.args.front().get();
+        if (dynamic_cast<const ColumnRefExpr*>(argument) && !descriptionColumn(argument, range)) return {};
+        auto& filter = filters.emplace_back();
+        if (call.filter && !bindDescriptionPredicates(call.filter.get(), range, filter)) return {};
+    }
+    return std::make_unique<DescriptionCountOp>(engine, database, objectFilter(range),
+        std::move(where), std::move(filters));
+}
+
 struct BtreePageSpec {
     StoredBtreeRange range;
     StoredBtreeOrder order;
@@ -6579,9 +6756,13 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
         }
     }
     OpPtr root = std::move(source);
-    if (select->whereClause) root = std::make_unique<PreparedFilterOp>(std::move(root), state);
-    if (!state->aggregates.empty() || select->having)
-        root = std::make_unique<PreparedAggregateOp>(std::move(root), state);
+    if (auto* descriptionCount = dynamic_cast<DescriptionCountOp*>(root.get())) {
+        descriptionCount->bindOutput(state);
+    } else {
+        if (select->whereClause) root = std::make_unique<PreparedFilterOp>(std::move(root), state);
+        if (!state->aggregates.empty() || select->having)
+            root = std::make_unique<PreparedAggregateOp>(std::move(root), state);
+    }
     if (countScan)
         root = std::make_unique<PreparedStoredCountOp>(std::move(root), countScan, state,
             std::move(countWhere), std::move(countFilters));
@@ -7861,19 +8042,22 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                     row=ownedNamespaceCatalogCells((**rows)[index]);return true;
                 });
         } else if (found->relationSchema == "pg_catalog" && found->relationName == description_catalog::name) {
-            for (const auto& output : found->columns) {
-                Column column; column.dataName = output.name; column.dataType = output.type;
-                column.isVariableLength = true; schema.append(column);
+            source = description_catalog::makeCountSource(*engine, database, *found);
+            if (!source) {
+                for (const auto& output : found->columns) {
+                    Column column; column.dataName = output.name; column.dataType = output.type;
+                    column.isVariableLength = true; schema.append(column);
+                }
+                auto rows = std::make_shared<std::optional<std::vector<PgDescriptionRow>>>();
+                source = std::make_unique<PreparedSourceRowsOp>(found->columns,
+                    [engine, database, rows, object = description_catalog::objectFilter(*found)](
+                        size_t index, std::vector<ExprValue>& row) {
+                        if (!*rows) *rows = engine->catalogService().descriptionSnapshot(database, object);
+                        if (index >= (**rows).size()) return false;
+                        row = description_catalog::cells((**rows)[index]);
+                        return true;
+                    });
             }
-            auto rows = std::make_shared<std::optional<std::vector<PgDescriptionRow>>>();
-            source = std::make_unique<PreparedSourceRowsOp>(found->columns,
-                [engine, database, rows, object = description_catalog::objectFilter(*found)](
-                    size_t index, std::vector<ExprValue>& row) {
-                    if (!*rows) *rows = engine->catalogService().descriptionSnapshot(database, object);
-                    if (index >= (**rows).size()) return false;
-                    row = description_catalog::cells((**rows)[index]);
-                    return true;
-                });
         } else if(found->relationSchema=="pg_catalog" && found->relationName=="pg_type") {
             for(const auto& output:found->columns) {
                 Column column;column.dataName=output.name;column.dataType=output.type;

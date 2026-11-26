@@ -1,6 +1,20 @@
 {
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
+
+    {
+      "issue": "2026-11-26 count visible pg_description rows directly",
+      "gap_ids": ["CAT-03", "QRY-07", "OPT-01", "MON-01"],
+      "status": "partial",
+      "evidence": ["src/catalog/DescriptionCount.h", "src/executor/ExecutionPlan.cpp", "src/main.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/object_description_protocol_e2e_test.py", "tests/catalog_snapshot_test.cpp", "tests/comment_dependency_test.cpp", "tests/physical_restore_catalog_staging_test.cpp"],
+      "verification": [
+        "Compare range and filtered counts, errors, wire types, private tables of the same name, and EXPLAIN output with PostgreSQL 18.6.",
+        "Check own writes, rollback, separate sessions and catalog counts after eight restart scenarios.",
+        "Measure count and ordinary-read controls on the same fixture before and after. Physical indexing and concurrent reader behavior remain open."
+      ]
+    },
+
     {
       "issue": "2026-11-26 avoid repeated catalog work for built-in OID comparisons",
       "gap_ids": ["TYPE-20", "CAT-03", "OPT-01"],

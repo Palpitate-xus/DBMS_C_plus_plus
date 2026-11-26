@@ -36,6 +36,9 @@ def check_relation(client, wire, reference):
                      ('objsubid','23','3','t','0'), ('description','25','4','t','950')],
                fields=[('attname',19), ('atttypid',26), ('attnum',21), ('attnotnull',16), ('attcollation',26)],
                tag='SELECT 4')
+    if not reference:
+        wire.query('SELECT count(*) AS total, count(description) AS texts FROM pg_catalog.pg_description',
+                   rows=[('0', '0')], fields=[('total', 20), ('texts', 20)])
 
     for analyze, count in (('', None), ('ANALYZE, TIMING OFF, ', 0)):
         sql = f"EXPLAIN ({analyze}COSTS OFF) SELECT description FROM pg_catalog.pg_description WHERE objoid=4294967295"
@@ -46,6 +49,7 @@ def check_relation(client, wire, reference):
     wire.command("INSERT INTO comment_shadow.pg_description VALUES ('shadow')", 'INSERT 0 1')
     wire.command('SET search_path=comment_shadow,pg_catalog', 'SET')
     wire.query('SELECT * FROM pg_description', rows=[('shadow',)], fields=[('note',25)])
+    wire.query('SELECT count(note) AS n FROM pg_description', rows=[('1',)], fields=[('n',20)])
     wire.query("SELECT 'pg_description'::regclass::oid = 'comment_shadow.pg_description'::regclass::oid AS v",
                rows=[('t',)], fields=[('v',16)])
     wire.query('SELECT 2609::oid::regclass AS v, pg_table_is_visible(2609) AS visible',
@@ -54,6 +58,42 @@ def check_relation(client, wire, reference):
     wire.query('SELECT note FROM pg_description', rows=[('updated shadow',)], fields=[('note',25)])
     wire.command('RESET search_path', 'RESET')
     wire.query("SELECT pg_catalog.pg_table_is_visible(2609) AS v", rows=[('t',)], fields=[('v',16)])
+
+
+def check_counts(client, wire, table, reference):
+    source = 'pg_catalog.pg_description AS d'
+    scope = f"d.objoid = '{table}'::oid AND d.classoid = 1259"
+    sql = ("SELECT count(*) AS total, count(d.description) FILTER (WHERE d.objsubid > 0) AS columns, "
+           "count(d.objoid) FILTER (WHERE 0 = d.objsubid) AS tables, "
+           "count(d.objsubid) FILTER (WHERE d.objsubid > 2147483648) AS absent "
+           f"FROM {source} WHERE {scope}")
+    fields = [('total', 20), ('columns', 20), ('tables', 20), ('absent', 20)]
+    wire.query(sql, rows=[('2', '1', '1', '0')], fields=fields)
+    Wire(client, wire.sock, extended=True).query(sql, rows=[('2', '1', '1', '0')], fields=fields)
+    wire.query(sql + ' OFFSET 1', rows=[], fields=fields, tag='SELECT 0')
+    wire.query(sql + ' LIMIT 0', rows=[], fields=fields, tag='SELECT 0')
+    # Aggregate emits one row even when there is no matching source row.
+    wire.query("SELECT count(description) AS n FROM pg_catalog.pg_description WHERE objoid=4294967295",
+               rows=[('0',)], fields=[('n', 20)])
+    # DISTINCT and predicates that can fail are executed by the ordinary
+    # evaluator. A safe leading key condition does not suppress later errors.
+    wire.query(f'SELECT count(DISTINCT d.objsubid) AS n FROM {source} WHERE {scope}',
+               rows=[('2',)], fields=[('n', 20)])
+    wire.query(f'SELECT count(*) AS n FROM {source} WHERE {scope} AND 1 / d.objsubid > 0',
+               state='22012', tag=None)
+
+    for analyze in ('', 'ANALYZE, TIMING OFF, '):
+        statement = f'EXPLAIN ({analyze}COSTS OFF) {sql}'
+        frames = wire.send_statements(statement)
+        lines = [row[0].decode() for row in client.data_row_values(frames)]
+        wire.check(statement, frames, rows=[(line,) for line in lines], tag='EXPLAIN', fields=[('QUERY PLAN', 25)])
+        node = 'Aggregate' if reference else 'Catalog Count'
+        counts = [line for line in lines if node in line]
+        assert len(counts) == 1, lines
+        if not reference:
+            assert 'pg_description' in counts[0] and 'Catalog Scan' not in '\n'.join(lines), lines
+        if analyze:
+            assert re.search(r'actual rows=1(?:\.\d+)? ', counts[0]), lines
 
 
 def check(client, sock, reference):
@@ -85,6 +125,7 @@ def check(client, sock, reference):
     view = oid("SELECT 'comment_lookup.note_view'::regclass::oid")
     note_type = oid("SELECT oid FROM pg_catalog.pg_type WHERE typname='note_state' AND "
                     f"typnamespace='{namespace}'::oid")
+    check_counts(client, wire, table, reference)
     check_plan(client, wire, "EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF) "
                f"SELECT description FROM pg_catalog.pg_description WHERE objoid={table}::oid", reference, 2)
     rows = [(str(table), '1259', '0', 'table details'), (str(table), '1259', '2', multiline)]
@@ -140,7 +181,10 @@ def check(client, sock, reference):
     wire.command("COMMENT ON TABLE comment_lookup.notes IS 'pending'", 'COMMENT', ready=b'T')
     table_note('pending')
     wire.command("COMMENT ON COLUMN comment_lookup.notes.body IS NULL", 'COMMENT', ready=b'T')
+    count = f"SELECT count(*) AS n FROM pg_catalog.pg_description WHERE objoid='{table}'::oid AND classoid=1259"
+    wire.query(count, rows=[('1',)], fields=[('n', 20)], ready=b'T')
     wire.command('ROLLBACK TO before_comment', 'ROLLBACK', ready=b'T')
+    wire.query(count, rows=[('2',)], fields=[('n', 20)], ready=b'T')
     wire.query(catalog, rows=rows, fields=fields, tag='SELECT 2', ready=b'T')
     wire.command("COMMENT ON TABLE comment_lookup.notes IS 'pending before index'", 'COMMENT', ready=b'T')
     wire.command('CREATE INDEX pending_note_index ON comment_lookup.notes(id)', 'CREATE INDEX', ready=b'T')
@@ -162,6 +206,7 @@ def check(client, sock, reference):
     wire.query(f"SELECT col_description('{table}'::oid,0) AS note", rows=[(None,)], fields=[('note', 25)])
     wire.command('COMMENT ON COLUMN comment_lookup.journal.content IS NULL', 'COMMENT')
     wire.query(catalog, rows=[], fields=fields, tag='SELECT 0')
+    wire.query(count, rows=[('0',)], fields=[('n', 20)])
     wire.command('DROP VIEW comment_lookup.note_view', 'DROP VIEW')
     wire.command('DROP TYPE comment_lookup.note_state', 'DROP TYPE')
     wire.command('DROP TABLE comment_lookup.journal', 'DROP TABLE')

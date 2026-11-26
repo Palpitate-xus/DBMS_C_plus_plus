@@ -94,6 +94,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/namespace_catalog.h"
 #include "catalog/description_catalog.h"
+#include "catalog/DescriptionCount.h"
 #include "catalog/namespace_query.h"
 #include "catalog/pg_stats_query.h"
 #include "catalog/MaintenanceProgressView.h"
@@ -22017,7 +22018,10 @@ class PreparedWithDmlRuntime {
             // must not capture the first correlated invocation forever.
             source=make_unique<dbms::PreparedSourceRowsOp>(dbms::QueryRowDescriptor{},
                 [](size_t index,vector<dbms::ExprValue>& row){row.clear();return index==0;});
-        } else if(!(source=ordinaryPhysicalReadSource(select,schema))) {
+        } else if (!(source = ordinaryPhysicalReadSource(select, schema)) &&
+                   !(select->fromClause->type == dbms::FromItem::Type::Table &&
+                     (source = dbms::description_catalog::makeCountSource(g_engine, session_.currentDB,
+                         sourceRange(select, select->fromClause.get()))))) {
             auto node=sourceNode(select,select->fromClause.get(),outer,frames,executionProvider);
             const function<bool(const dbms::FromItem*)> physicalSources=[&](const dbms::FromItem* item) {
                 if(!item)return false;

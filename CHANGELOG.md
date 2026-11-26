@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>同时统计表和列的注释更快 · 2026-11-26</summary>
+
+在额外写入 1,024 条列注释的测试库里，一次查询分别统计表注释、列注释和总数，用时从约 50 毫秒缩短到约 7.7 毫秒。
+
+[测试报告](docs/test-report.md#description-count-20261126) · [性能报告](docs/performance-report-2026-10-30.md#description-count-cost-20261126)
+
+</details>
+
+<details>
 <summary>按编号统计表注释更快 · 2026-11-26</summary>
 
 在额外写入 1,024 条列注释的测试库里，按编号范围统计表注释，从约 264 毫秒缩短到约 28 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>修改注释所需的临时备份更小 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 修改注释所需的临时备份更小
 
 在额外建了 128 张表的测试库里，修改一条注释时，为了能撤销修改而保留的临时备份，从约 131 KB 缩小到不到 1 KB。
 
 [测试报告](docs/test-report.md#comment-compact-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#comment-compact-undo-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 给表和列保存注释更快
 

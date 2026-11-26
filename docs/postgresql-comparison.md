@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 直接统计注释记录
+
+PostgreSQL 可以从索引读取筛选所需的列，并根据该事务能看到的记录计数。SQLite 的精确计数可以在 B-tree 上完成。DuckDB 分批统计输入行，并可以将已确认不含空值的 `COUNT(列)` 转为 `COUNT(*)`。 [PostgreSQL 索引扫描](https://www.postgresql.org/docs/18/indexes-index-only-scans.html) · [SQLite Count 指令](https://www.sqlite.org/opcode.html#Count) · [DuckDB 计数实现](https://github.com/duckdb/duckdb/blob/v1.5.0/src/function/aggregate/distributive/count.cpp)
+
+本项目直接用当前查询可见的注释记录统计总数和分项数量。编号范围仍需逐条比较，注释目录的实体索引和并发读取还有差距。 [测试报告](test-report.md#description-count-20261126) · [性能报告](performance-report-2026-10-30.md#description-count-cost-20261126)
+
 ## 2026-11-26 · 比较对象编号时省去重复目录检查
 
 PostgreSQL 18.6 为三种整数到 `oid` 登记隐式转换，32 位整数可以保留原有位模式。它也可以从多列索引中按对象编号查找注释。SQLite 可以用包含查询字段的索引避免回表。DuckDB 的列最值记录可以跳过不可能匹配的数据组。 [PostgreSQL 转换定义](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_cast.dat#L103-L112) · [PostgreSQL 多列索引](https://www.postgresql.org/docs/18/indexes-multicolumn.html) · [SQLite 查询规划](https://www.sqlite.org/queryplanner.html#covidx) · [DuckDB 索引](https://duckdb.org/docs/current/sql/indexes)

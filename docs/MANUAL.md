@@ -1093,6 +1093,17 @@ WHERE objoid = 'shop.orders'::regclass::oid;
 
 上例假设已经创建 `shop.orders`。需要避开同名的用户表时，写全 `pg_catalog.pg_description`。 [测试报告](test-report.md#description-relation-20261126)
 
+如果想统计某张表和它的列一共有多少条注释，可以在同一次查询中分别统计。`classoid = 1259` 将查询限定在表等关系对象的注释上。
+
+```sql
+SELECT count(*) AS total,
+       count(description) FILTER (WHERE objsubid > 0) AS column_notes
+FROM pg_catalog.pg_description
+WHERE objoid = 'shop.orders'::regclass::oid AND classoid = 1259;
+```
+
+`EXPLAIN` 中的 `Catalog Count` 表示数据库可以直接统计可见的注释记录。 [测试报告](test-report.md#description-count-20261126)
+
 ### 修改表
 
 用 `ALTER TABLE ... RENAME COLUMN` 改列名时，已有的检查约束和生成列表达式会使用新列名。比如把 `"数量"` 改成 `"订购数量"` 后，正数检查和用数量计算的列仍会生效。双引号保留大小写，`"D"` 和 `d` 可以是不同的列。[改名和回滚测试](test-report.md#rename-quoted-column-references-20261122)
