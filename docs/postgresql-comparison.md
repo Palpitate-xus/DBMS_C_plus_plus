@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 用表编号缩小列目录的读取范围
+
+PostgreSQL 转换未知类型的字符串时可在解析阶段生成已定型的常量；`pg_attribute` 有按表编号、列序号查找的索引。SQLite 分析 `WHERE` 的比较条件，再为符合条件的项选择索引。DuckDB 的优化器把可预先计算的表达式变成常量。 [PostgreSQL 18.6 类型转换源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_coerce.c) · [PostgreSQL 18.6 列目录声明](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/include/catalog/pg_attribute.h) · [SQLite 条件分析](https://www.sqlite.org/optoverview.html#where_clause_analysis) · [DuckDB 常量折叠源码](https://raw.githubusercontent.com/duckdb/duckdb/v1.4.2/src/optimizer/rule/constant_folding.cpp)
+
+本项目确认等值条件中的常量实际使用内置 `oid` 类型，再将各种写法转换成同一个编号。用表名转换得到 `regclass` 的情况仍需要查询实际目录。 [测试结果](test-report.md#typed-oid-catalog-filter-20261126) · [性能对照](performance-report-2026-10-30.md#typed-oid-catalog-cost-20261126)
+
 ## 2026-11-26 · 关闭时保留目录所需的数据
 
 PostgreSQL 后端按类型编号维护类型缓存，并注册目录变更的失效回调。SQLite 的关闭接口要求先释放连接等资源。DuckDB 的数据库实例先清理附加数据库，再释放调度器、日志管理器和缓冲区。 [PostgreSQL 18.6 类型缓存源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/cache/typcache.c) · [SQLite 关闭接口](https://www.sqlite.org/c3ref/initialize.html) · [DuckDB 1.4.2 数据库实例源码](https://raw.githubusercontent.com/duckdb/duckdb/v1.4.2/src/main/database.cpp)

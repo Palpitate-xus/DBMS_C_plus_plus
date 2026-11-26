@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-26 use bound OID constants in catalog equality filters",
+      "gap_ids": ["CAT-03", "QRY-01"],
+      "status": "partial",
+      "evidence": ["src/parser/query_binding.cpp", "src/catalog/TypeCatalogScan.h", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/format_type_protocol_e2e_test.py", "tests/catalog_oid_join_filter_protocol_e2e_test.py"],
+      "verification": [
+        "Use the actual built-in OID declaration and the existing input rules for constant equality operands.",
+        "Verify hexadecimal, octal, missing rows, malformed input, overflow and data recovery across restart.",
+        "Compare explicit casts with uncast numeric and symbolic relation-name restrictions. Symbolic lookup remains open."
+      ]
+    },
+    {
       "issue": "2026-11-26 keep catalog reload dependencies available during shutdown",
       "gap_ids": ["CAT-02", "WAL-08"],
       "status": "partial",

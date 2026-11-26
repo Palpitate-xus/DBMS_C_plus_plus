@@ -9,6 +9,7 @@
 #include "catalog/catalog.h"
 #include "catalog/declared_type.h"
 #include "common/DbError.h"
+#include "common/OidInput.h"
 #include "common/SqlTrivia.h"
 #include "expression/common_type.h"
 #include "expression/equality_type.h"
@@ -392,6 +393,55 @@ public:
         return unary && unary->op.rfind("COLLATE ",0)==0
             ? expressionTypeOid(unary->operand.get()) : 0;
     }
+
+    // Both CAST and :: have their own AST shapes. Replace only a proven
+    // built-in OID constant, leaving invalid and runtime inputs for the
+    // original expression to evaluate at the point of demand.
+    void bindOidComparisonConstant(ExprPtr& input) {
+        if (!input || input->preparedSubquery || expressionTypeOid(input.get()) != 26) return;
+        const Expr* operand = input.get();
+        if (const auto* cast = dynamic_cast<const CastExpr*>(operand)) {
+            if (!cast->typeMods.empty()) return;
+            operand = cast->operand.get();
+        } else if (const auto* cast = dynamic_cast<const BinaryOpExpr*>(operand)) {
+            const auto* target = dynamic_cast<const LiteralExpr*>(cast->right.get());
+            if (cast->op != "::" || !target || !SQLParser::parseTypeSpecification(target->value).typeMods.empty())
+                return;
+            operand = cast->left.get();
+        }
+        const auto* literal = dynamic_cast<const LiteralExpr*>(operand);
+        if (!literal || literal->preparedSubquery || literal->arraySubquery ||
+            literal->analyzedPrimitiveConstant || (operand != input.get() && !literal->typeName.empty())) return;
+        if (operand == input.get() && !SQLParser::parseTypeSpecification(literal->typeName).typeMods.empty()) return;
+
+        const auto& text = literal->value;
+        Oid oid;
+        if (text.size() >= 2 && text.front() == '\'' && text.back() == '\'') {
+            try { oid = parseOidInput(text.substr(1, text.size() - 2)); }
+            catch (const DbError&) { return; }
+        } else {
+            if (operand == input.get()) return;
+            int64_t number;
+            const char* end = text.data() + text.size();
+            const auto parsed = std::from_chars(text.data(), end, number);
+            if (parsed.ec != std::errc{} || parsed.ptr != end ||
+                number < std::numeric_limits<int32_t>::min() || number > std::numeric_limits<Oid>::max()) return;
+            oid = static_cast<Oid>(number);
+        }
+
+        auto value = std::make_unique<LiteralExpr>();
+        value->typeName = "oid";
+        value->value = std::to_string(oid);
+        value->analyzedPrimitiveConstant = true;
+        value->sourceBegin = input->sourceBegin;
+        value->sourceEnd = input->sourceEnd;
+        valueTypeOids.erase(input.get());
+        valueTypeMetadata.erase(input.get());
+        valueTypeModifiers.erase(input.get());
+        valueTypeOids[value.get()] = 26;
+        input = std::move(value);
+    }
+
     int32_t expressionTypeModifier(const Expr* node) const {
         const auto resolved=valueTypeModifiers.find(node);
         if(resolved!=valueTypeModifiers.end())return resolved->second;
@@ -1111,6 +1161,10 @@ public:
                     integerInput(binary->right,common_type_detail::canonical(left));
                 else if(!binary->comparison && integer(right) && left=="unknown" && unknownLiteral(binary->left.get()))
                     integerInput(binary->left,common_type_detail::canonical(right));
+                if (binary->op == "=" && !binary->comparison && leftBase == "oid" && rightBase == "oid") {
+                    bindOidComparisonConstant(binary->left);
+                    bindOidComparisonConstant(binary->right);
+                }
             }
             const bool bitOperand=leftBase=="bit" || leftBase=="bit varying" ||
                                   rightBase=="bit" || rightBase=="bit varying";

@@ -12,14 +12,6 @@ namespace dbms {
 
 inline std::optional<Oid> catalogOidLiteralValue(const Expr* input, bool allowQuoted) {
     if (!input || input->preparedSubquery) return std::nullopt;
-    const auto* cast = dynamic_cast<const CastExpr*>(input);
-    if (cast) {
-        CatalogManager::QualifiedName target;
-        if (!cast->typeMods.empty() || !CatalogManager::parseQualifiedName(cast->typeName, target, true) ||
-            target.schema != "pg_catalog" || target.name != "oid")
-            return std::nullopt;
-        input = cast->operand.get();
-    }
     const auto* literal = dynamic_cast<const LiteralExpr*>(input);
     if (!literal || literal->preparedSubquery || literal->arraySubquery) return std::nullopt;
     if (!literal->typeName.empty() && (!literal->analyzedPrimitiveConstant ||
@@ -29,10 +21,14 @@ inline std::optional<Oid> catalogOidLiteralValue(const Expr* input, bool allowQu
 
     // Never evaluate a literal or cast during source selection.
     std::string_view digits = literal->value;
-    if ((cast || literal->analyzedPrimitiveConstant || allowQuoted) && digits.size() >= 2 &&
+    if ((literal->analyzedPrimitiveConstant || allowQuoted) && digits.size() >= 2 &&
         digits.front() == '\'' && digits.back() == '\'') {
         digits.remove_prefix(1);
         digits.remove_suffix(1);
+        // Quoted OID input can use octal. Only the bound, normalized value
+        // can be interpreted as decimal when it has a leading zero.
+        if (!literal->analyzedPrimitiveConstant && digits.size() > 1 && digits.front() == '0')
+            return std::nullopt;
     }
     if (digits.empty() || digits.size() > 10) return std::nullopt;
     Oid oid;

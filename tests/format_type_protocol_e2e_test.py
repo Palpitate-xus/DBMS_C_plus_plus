@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Verify format_type against real column declarations and PostgreSQL 18."""
 
+import json
 import struct
 
 from compat.numeric_type_review import Review
+from catalog_oid_join_filter_protocol_e2e_test import plan_nodes
 from session_setting_functions_protocol_e2e_test import Wire
 
 
@@ -92,9 +94,46 @@ def main():
         wire.command("CREATE DOMAIN format_a.labels AS varchar(7)[]", "CREATE DOMAIN")
         wire.command("""CREATE TYPE format_a."Case.Row" AS ENUM ('x')""", "CREATE TYPE")
         wire.command("CREATE TABLE format_a.format_probe(" + COLUMNS + ")", "CREATE TABLE")
+        probe = wire.send_statements("SELECT 'format_a.format_probe'::regclass::oid AS id")
+        table_oid = int(client.data_row_values(probe)[0][0])
+        columns_by_oid = (
+            "SELECT a.attname, pg_catalog.format_type(a.atttypid,a.atttypmod) AS declared "
+            "FROM pg_catalog.pg_attribute a WHERE {equality} AND a.attnum>0 ORDER BY a.attnum"
+        )
+        fields = [("attname", 19), ("declared", 25)]
         for extended in (False, True):
-            Wire(client, sock, extended).query(COLUMN_QUERY, rows=DECLARATIONS,
-                fields=[("attname", 19), ("declared", 25)], tag=f"SELECT {len(DECLARATIONS)}")
+            mode = Wire(client, sock, extended)
+            mode.query(COLUMN_QUERY, rows=DECLARATIONS, fields=fields, tag=f"SELECT {len(DECLARATIONS)}")
+            for equality in (
+                f"a.attrelid='{table_oid}'::oid",
+                f"'{table_oid}'::pg_catalog.oid=a.attrelid",
+                f"a.attrelid=CAST('{table_oid}' AS oid)",
+                f"a.attrelid=CAST('0{table_oid:o}' AS pg_catalog.oid)",
+                f"a.attrelid=OID '0x{table_oid:x}'",
+                f"a.attrelid={table_oid}::oid",
+                "a.attrelid='format_a.format_probe'::regclass",
+            ):
+                mode.query(columns_by_oid.format(equality=equality), rows=DECLARATIONS,
+                           fields=fields, tag=f"SELECT {len(DECLARATIONS)}")
+            for value in ("NULL::oid", "'0'::oid", "4294967295::pg_catalog.oid"):
+                mode.query(columns_by_oid.format(equality=f"a.attrelid={value}"), fields=fields, tag="SELECT 0")
+            for value, state in (("CAST('08' AS pg_catalog.oid)", "22P02"),
+                                 ("'4294967296'::oid", "22003")):
+                mode.query(columns_by_oid.format(equality=f"a.attrelid={value}"), state=state, tag=None)
+        review.parameter(columns_by_oid.format(equality="a.attrelid=$1::oid"),
+                         [str(table_oid)], [26], [list(row) for row in DECLARATIONS], [19, 25])
+        assert not review.failures
+        if review.server:
+            # An earlier error still belongs to the unfiltered source rows.
+            earlier = "1/(CASE WHEN a.attrelid='1249'::oid THEN 0 ELSE 1 END)=1"
+            wire.query(columns_by_oid.format(equality=f"{earlier} AND a.attrelid='{table_oid}'::oid"),
+                       state="22012", tag=None)
+            sql = columns_by_oid.format(equality=f"a.attrelid='{table_oid}'::oid")
+            frames = wire.send_statements("EXPLAIN (FORMAT JSON, ANALYZE TRUE, TIMING FALSE) " + sql)
+            assert not any(kind == b"E" for kind, _ in frames), frames
+            plan = json.loads("\n".join(row[0].decode() for row in client.data_row_values(frames)))
+            sources = [node["actualRows"] for node in plan_nodes(plan["plan"]) if node["nodeType"] == "TypedSource"]
+            assert plan["actualRows"] == len(DECLARATIONS) and sources == [len(DECLARATIONS) + 6], plan
 
         display("'format_a.status'::regtype", "format_a.status")
         display("'format_a.status[]'::regtype", "format_a.status[]")

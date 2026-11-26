@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按表编号查看列信息更快 · 2026-11-26</summary>
+
+查询系统目录时，写了 `::oid` 或 `CAST` 也能先定位到这张表。在额外建了 32 张表的测试中，列出四列的查询从约 97 毫秒降到约 5 毫秒。八进制编号也能查到正确的列。
+
+[测试报告](docs/test-report.md#typed-oid-catalog-filter-20261126) · [性能报告](docs/performance-report-2026-10-30.md#typed-oid-catalog-cost-20261126)
+
+</details>
+
+<details>
 <summary>修复回滚后关闭数据库时的崩溃 · 2026-11-26</summary>
 
 从 C++ 调用数据库时，撤销表结构修改后再关闭数据库，有时会在保存表信息时崩溃。现在这一过程可以正常完成。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>反复查看同一张表的索引更快 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 反复查看同一张表的索引更快
 
 反复查看索引时，数据库需要读的文件更少。在一张有 512 列的测试表上，`psql` 用来显示索引列的查询从约 10 毫秒降到约 8.5 毫秒。
 
 [测试报告](docs/test-report.md#witnessed-index-files-20261124) · [性能报告](docs/performance-report-2026-10-30.md#witnessed-index-files-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 用 psql 查看索引列更快
 
