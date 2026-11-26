@@ -4951,6 +4951,27 @@ static std::optional<StorageEngine::IntegerPartitionFilter> integerKeyPredicate(
     return Filter::comparison(op, endpoint->value);
 }
 
+std::optional<StorageEngine::IntegerPrimaryKeyMutationRange> preparedMutationPrimaryKeyRange(
+        const PreparedQuery& query, const Expr* where, const TableSchema& schema, size_t targetOrdinal) {
+    if (!where || !schema.physicalRelationId || schema.partitionType != TableSchema::PartitionType::None ||
+        std::any_of(schema.cols.begin(), schema.cols.end(),
+            [](const auto& column) { return column.generatedKind == 'v'; })) return {};
+    const auto ordinal = primary_key_index::singleKeyColumn(schema);
+    if (!ordinal || *ordinal >= schema.len()) return {};
+    const auto& column = schema.cols[*ordinal];
+    const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
+    if ((type != "smallint" && type != "integer" && type != "bigint") || column.isArray ||
+        column.isUnsigned || column.isNull || column.generatedKind || !column.domainName.empty()) return {};
+
+    size_t remaining = maxRangePredicateNodes;
+    auto filter = integerKeyPredicate(where, targetOrdinal, *ordinal, type, &query, &remaining);
+    if (!filter || filter->intervals.empty() ||
+        (filter->intervals.size() == 1 &&
+         filter->intervals.front() == IntegerInterval{INT64_MIN, INT64_MAX})) return {};
+    return StorageEngine::IntegerPrimaryKeyMutationRange{
+        schema.physicalRelationId, *ordinal, std::move(filter->intervals)};
+}
+
 static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumnBinding& key,
                                        const TableSchema& schema, const PreparedQuery& query,
                                        IntegerPageBounds& bounds) {

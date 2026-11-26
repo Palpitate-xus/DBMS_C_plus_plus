@@ -544,6 +544,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/index_corruption_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/missing_index_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/primary_key_plan_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/primary_key_range_mutation_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/long_text_primary_key_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/composite_primary_key_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/composite_primary_lookup_protocol_e2e_test.py)

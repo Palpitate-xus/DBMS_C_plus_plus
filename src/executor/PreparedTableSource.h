@@ -33,6 +33,9 @@ struct PreparedViewIntegerFilter {
 std::vector<PreparedViewIntegerFilter> preparedViewIntegerFilters(const PreparedQuery& parent,
     const PreparedQuery::SourceRange& range, const std::vector<PreparedViewIntegerFilter>& filters);
 
+std::optional<StorageEngine::IntegerPrimaryKeyMutationRange> preparedMutationPrimaryKeyRange(
+    const PreparedQuery& query, const Expr* where, const TableSchema& schema, size_t targetOrdinal);
+
 // Shared physical source construction for native and frontend prepared
 // graphs. This never opens a source or evaluates a query expression.
 OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,

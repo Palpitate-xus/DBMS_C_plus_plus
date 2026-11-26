@@ -728,6 +728,11 @@ public:
         uint64_t physicalRelationId = 0;
         int64_t value = 0;
     };
+    struct IntegerPrimaryKeyMutationRange {
+        uint64_t physicalRelationId;
+        size_t columnOrdinal;
+        std::vector<std::pair<int64_t, int64_t>> intervals;
+    };
     // The physical target occurrence remains distinct even when two tuples
     // have identical nullable values. Optional callbacks preserve the legacy
     // mutation path (RLS/FKs/triggers/locks/indexes) and are never inherited by
@@ -750,6 +755,7 @@ public:
         std::string targetPrimaryKeyProbe;
         std::optional<IntegerHeapEqualityCandidate> integerHeapEquality;
         SqlNewRowCheck checkNewRow;
+        std::optional<IntegerPrimaryKeyMutationRange> integerPrimaryKeyRange;
     };
 
     using UpdateResolver = std::function<bool(
@@ -1709,6 +1715,8 @@ public:
 
     // Own the complete ordered prefix before exposing any row. An unavailable
     // prefix uses the caller's ordinary heap scan and sort.
+    // A mutation may supply its active command snapshot while holding the
+    // relation's write intent lock. That path must request the complete range.
     std::optional<OrderedPrimaryKeyReadPage> tryReadOrderedIntegerPrimaryKey(
         const std::string& dbname, const std::string& tablename,
         const TableSchema& expectedSchema, size_t keyColumn, bool descending,
@@ -1716,7 +1724,7 @@ public:
         std::optional<int64_t> upper = {},
         const std::vector<OrderedPrimaryKeyNullTest>& nullTests = {}, bool completeRange = false,
         const std::vector<std::pair<int64_t, int64_t>>& disjointRanges = {},
-        const std::vector<bool>& projectedColumns = {});
+        const std::vector<bool>& projectedColumns = {}, const ReadView* mutationView = nullptr);
 
     // Schema helpers (public for execution plan use)
     static std::string extractPKValue(const std::string& rowBuffer, const TableSchema& tbl);

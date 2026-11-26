@@ -11341,7 +11341,7 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         size_t count, size_t byteBudget, std::optional<int64_t> lower,
         std::optional<int64_t> upper, const std::vector<OrderedPrimaryKeyNullTest>& nullTests,
         bool completeRange, const std::vector<std::pair<int64_t, int64_t>>& disjointRanges,
-        const std::vector<bool>& projectedColumns) {
+        const std::vector<bool>& projectedColumns, const ReadView* mutationView) {
     // Only files in the executable's locked data directory have the required
     // instance ownership. An external tablespace can outlive that lock.
     if (dataDirectory().empty() || !count || signedIntegerPrimaryKeyColumn(expectedSchema) != keyColumn ||
@@ -11351,10 +11351,16 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
             return test.column >= expectedSchema.len();
         }))
         return {};
+    auto& context = transactionContext();
+    if (mutationView && (!completeRange || mutationView != &context.readView ||
+        !mutationView->commandIdVisibility || context.commandInternalRelations.count(tablename))) return {};
     checkForQueryInterrupt();
     lockManager_.setResourceNamespace(dbname);
-    if (!lockManager_.lockExclusiveNoWait(tablename)) return {};
-    ResourceUnlockGuard relation(lockManager_, tablename);
+    std::optional<ResourceUnlockGuard> relation;
+    if (!mutationView) {
+        if (!lockManager_.lockExclusiveNoWait(tablename)) return {};
+        relation.emplace(lockManager_, tablename);
+    }
     const auto schema = getTableSchema(dbname, tablename);
     if (schema.physicalRelationId != expectedSchema.physicalRelationId || schema.len() != expectedSchema.len() ||
         schema.formatVersion != expectedSchema.formatVersion || schema.tablespace != expectedSchema.tablespace ||
@@ -11376,7 +11382,8 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     const auto before = indexReadSnapshotFence(dbname);
     // For an existing READ COMMITTED command, the ordinary scan establishes
     // its view first below. Do not allow a current index for an older view.
-    const auto* view = prepareRowScanView(dbname, tablename, nullptr, false, autocommit, commandView);
+    const auto* view = mutationView
+        ? mutationView : prepareRowScanView(dbname, tablename, nullptr, false, autocommit, commandView);
     const auto fence = indexReadSnapshotFence(dbname);
     if (!fence || !view || view == &commandView || view->lowLimitId != *fence + 1 ||
         (before && before != fence)) return {};
@@ -11552,7 +11559,7 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
             if (!copyTuple(buffer, slotId, raw, bitmap)) return false;
             // The exclusive relation lock protects the copy between reads.
             // Release the page lock before resolving any external values.
-            if (samePageFollows && pageBytes <= remaining - keyBufferBytes) {
+            if (relation && samePageFollows && pageBytes <= remaining - keyBufferBytes) {
                 if (!pageCopy) pageCopy.reset(new char[pageBytes]);
                 std::memcpy(pageCopy.get(), buffer, pageBytes);
                 copiedPage = pageId;
@@ -35471,6 +35478,31 @@ static bool canProbeCurrentMutationKey(const TableSchema& table,
         !isSessionTemporaryRelation(tablename);
 }
 
+template<typename Context>
+static bool collectCurrentMutationKeyRange(StorageEngine& engine, const std::string& dbname,
+        const std::string& tablename, const TableSchema& table, Context& context,
+        uint64_t ownerBeforeWrite, PageAllocator* allocator,
+        const StorageEngine::SqlMutationCallbacks* callbacks, std::set<int64_t>& targets) {
+    if (!callbacks || !callbacks->integerPrimaryKeyRange ||
+        !canProbeCurrentMutationKey(table, tablename, context, ownerBeforeWrite, allocator)) return false;
+    const auto& range = *callbacks->integerPrimaryKeyRange;
+    if (range.physicalRelationId != table.physicalRelationId || range.intervals.empty() ||
+        !engine.indexReadSnapshotFence(dbname)) return false;
+    const auto* session = currentSession();
+    const size_t workMemKb = session ? session->workMem.effective(g_config.workMemKb) : g_config.workMemKb;
+    const size_t byteBudget = std::min(workMemKb, std::numeric_limits<size_t>::max() / 1024) * 1024;
+    // Only the RIDs escape. The existing matcher and writer still read the
+    // actual values and recheck the condition after any row-lock wait.
+    const auto rows = engine.tryReadOrderedIntegerPrimaryKey(dbname, tablename, table,
+        range.columnOrdinal, false, std::numeric_limits<size_t>::max(), byteBudget,
+        {}, {}, {}, true, range.intervals, std::vector<bool>(table.len(), false), &context.readView);
+    if (!rows) return false;
+    for (const auto& row : rows->rows) targets.insert(row.rid);
+    context.hasRead = true;
+    context.querySnapshotUsed = true;
+    return true;
+}
+
 template<typename Context, typename Registry>
 static std::optional<int64_t> matchCurrentIntegerPrimaryKey(
         StorageEngine& engine, const std::string& dbname, const std::string& tablename,
@@ -36381,7 +36413,8 @@ DBStatus StorageEngine::removeInternal(
         else if (const auto status = matchCurrentCompositePrimaryKey(*this, dbname, tablename,
                 tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry(), toDelete))
             scanFailed = *status != DBStatus::OK;
-        else {
+        else if (!conds.empty() || !collectCurrentMutationKeyRange(*this, dbname, tablename, tbl, context,
+                     ownerBeforeWrite, pa, mutationCallbacks, toDelete)) {
             const auto collected = collectIntegerHeapEquality(
                 *this, dbname, tablename, tbl, mutationCallbacks, bool(deleteMatcher),
                 context.inTransaction && context.txnDB == dbname, context.txnIsolationLevel,
@@ -38061,15 +38094,18 @@ DBStatus StorageEngine::updateInternal(
                        tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry(), matchIds)) {
             scanFailed = *status != DBStatus::OK;
         } else if (conds.empty()) {
-            const auto collected = collectIntegerHeapEquality(
-                *this, dbname, tablename, tbl, mutationCallbacks, bool(updateMatcher),
-                context.inTransaction && context.txnDB == dbname, context.txnIsolationLevel,
-                true, matchIds);
-            if (collected == IntegerHeapCollection::IoError) scanFailed = true;
-            else if (collected == IntegerHeapCollection::Unavailable &&
-                !forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) {
-                    matchIds.insert(encodeRid(pid, sid));
-                })) scanFailed = true;
+            if (!collectCurrentMutationKeyRange(*this, dbname, tablename, tbl, context,
+                    ownerBeforeWrite, pa, mutationCallbacks, matchIds)) {
+                const auto collected = collectIntegerHeapEquality(
+                    *this, dbname, tablename, tbl, mutationCallbacks, bool(updateMatcher),
+                    context.inTransaction && context.txnDB == dbname, context.txnIsolationLevel,
+                    true, matchIds);
+                if (collected == IntegerHeapCollection::IoError) scanFailed = true;
+                else if (collected == IntegerHeapCollection::Unavailable &&
+                    !forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) {
+                        matchIds.insert(encodeRid(pid, sid));
+                    })) scanFailed = true;
+            }
         } else {
             matchIds = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
         }

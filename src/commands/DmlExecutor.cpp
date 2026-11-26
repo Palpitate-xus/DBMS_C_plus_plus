@@ -22,6 +22,7 @@
 #include "expression/expr_helper.h"
 #include "expression/prepared_query_execution.h"
 #include "executor/ExecutionPlan.h"
+#include "executor/PreparedTableSource.h"
 #include "executor/CompositeKeyLookup.h"
 #include "parser/parser.h"
 #include "permissions.h"
@@ -4893,6 +4894,8 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         if (candidates.empty())
             candidates = boundCompositePrimaryKeyCandidates(update->whereClause.get(), table, targetOrdinal);
         if (candidates.empty()) {
+            callbacks.integerPrimaryKeyRange = preparedMutationPrimaryKeyRange(
+                *prepared, update->whereClause.get(), table, targetOrdinal);
             callbacks.integerHeapEquality = boundIntegerHeapEquality(update->whereClause.get(), table, targetOrdinal);
             const auto& equality = callbacks.integerHeapEquality;
             if (table.partitionType == TableSchema::PartitionType::Range && equality &&
@@ -7543,6 +7546,9 @@ private:
         auto candidates = integerEqualityCandidates(remove->whereClause.get());
         if (candidates.empty() && !viewSource_)
             candidates = boundCompositePrimaryKeyCandidates(remove->whereClause.get(), table_, target_->ordinal);
+        if (candidates.empty() && !viewSource_ && statement_ == query_->ast.get())
+            callbacks.integerPrimaryKeyRange = preparedMutationPrimaryKeyRange(
+                *query_, remove->whereClause.get(), table_, target_->ordinal);
         const auto status=g_engine.removeRows(session_.currentDB,physical_,candidates,returning_->empty()?nullptr:&images,matcher,&count,&callbacks,virtualRows.output(),true);
         if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH DELETE failed");
         return result(deletedReturningImages(images,&virtualRows),"DELETE",count);

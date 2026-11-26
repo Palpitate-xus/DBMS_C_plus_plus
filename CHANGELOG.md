@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按一段订单号修改或删除更快了</summary>
+
+例如，要给订单号 42 到 49 的记录标记为已复核，数据库可以先直接找到这几笔订单，再逐条检查并修改。删除一段编号也可以用这个方法。
+
+2026-11-26 · [用法](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#key-range-mutations-20261126) · [性能报告](docs/performance-report-2026-10-30.md#key-range-mutation-cost-20261126)
+
+</details>
+
+<details>
 <summary>库里表多时，查报表更快了</summary>
 
 例如，库里还有上百张表时，打开订单报表前只整理查询涉及的表的列信息。客户端也能更快拿到列名和类型。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查多层报表时少占内存</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 查多层报表时少占内存
 
 例如，一份订单报表来自另一份报表时，数据库可以逐条传递记录，省去在每一步留一份副本的开销。排序或多次使用同一批记录时，仍会保留需要的数据。
 
-2026-11-26 · [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#forward-view-inputs-20261126) · [性能报告](docs/performance-report-2026-10-30.md#forward-view-input-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#forward-view-inputs-20261126) · [性能报告](docs/performance-report-2026-10-30.md#forward-view-input-cost-20261126)
 
 ## 2026-11-26 · 查上千个订单号也能少读数据
 

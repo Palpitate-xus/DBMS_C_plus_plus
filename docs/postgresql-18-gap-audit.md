@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 用整数主键范围找到待修改的行
+
+普通表首次写入可从当前版本的整数主键索引读取完整候选集，再用原条件和行锁流程修改或删除。使用旧快照、已在同一事务写入、候选覆盖过多数据页或超过工作内存时扫描表。`DML-01`、`IDX-03`、`TXN-01` 和 `TXN-02` 保持部分实现。 [功能验证](test-report.md#key-range-mutations-20261126) · [性能报告](performance-report-2026-10-30.md#key-range-mutation-cost-20261126)
+
 ## 2026-11-26 · 减少查询准备时处理的列信息
 
 目录绑定只整理当前关系的有效列，并从同一份目录快照保留实际列顺序。受支持的多层视图在结果类型齐备时，直接用已绑定的列说明回复客户端。`CAT-02`、`QRY-12` 和 `PROTO-04` 保持部分实现。 [功能验证](test-report.md#bound-column-metadata-20261126) · [性能报告](performance-report-2026-10-30.md#bound-column-metadata-cost-20261126)

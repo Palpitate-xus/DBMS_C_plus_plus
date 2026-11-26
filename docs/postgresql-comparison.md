@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 按主键范围定位待修改的记录
+
+PostgreSQL 18.6 对受测的单段或两段整数范围使用 B-tree 位图扫描定位 `UPDATE` 和 `DELETE` 的目标。行锁等待结束后，会按隔离级别检查最新版本。SQLite 会为 `BETWEEN` 分析上下界，并可对不同 `OR` 分支分别查索引。DuckDB 的最小值和最大值索引会跳过无关数据块，单列 ART 扫描主要用于等值和 `IN` 条件。 [PostgreSQL 索引类型](https://www.postgresql.org/docs/18/indexes-types.html) · [PostgreSQL 事务隔离](https://www.postgresql.org/docs/18/transaction-iso.html) · [SQLite 查询优化](https://www.sqlite.org/optoverview.html) · [DuckDB 索引](https://duckdb.org/docs/current/guides/performance/indexing)
+
 ## 2026-11-26 · 用已确定的类型生成列说明
 
 PostgreSQL 的 `Describe`、SQLite 的 `sqlite3_column_name` 和 DuckDB 的列类型接口都可以在执行前取得结果的列信息。本项目在多层视图的列类型已经确定时，用这些类型直接生成协议说明，并按绑定关系追溯列的来源。 [PostgreSQL 消息流程](https://www.postgresql.org/docs/18/protocol-flow.html#PROTOCOL-FLOW-EXT-QUERY) · [SQLite 列名接口](https://www.sqlite.org/c3ref/column_name.html) · [DuckDB 预编译语句接口](https://duckdb.org/docs/lts/clients/c/prepared) · [性能报告](performance-report-2026-10-30.md#bound-column-metadata-cost-20261126)

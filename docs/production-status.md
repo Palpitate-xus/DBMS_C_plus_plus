@@ -6,6 +6,10 @@
 
 截至 2026-11-26，273 项功能要求中有 22 项完成、170 项部分实现、66 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-26 · 更新和删除先定位主键范围
+
+符合条件的普通单表写入可以从整数主键索引定位完整的目标范围。只有当前索引与语句快照相符、页数和内存成本合适时才用索引定位，随后仍执行完整写入检查。 [测试报告](test-report.md#key-range-mutations-20261126) · [性能报告](performance-report-2026-10-30.md#key-range-mutation-cost-20261126)
+
 ## 2026-11-26 · 查询准备少做列信息整理
 
 分析查询使用的表和视图时，只给当前关系的有效列排序。多层视图能直接使用已确定的列名和类型回复客户端。 [测试报告](test-report.md#bound-column-metadata-20261126) · [性能报告](performance-report-2026-10-30.md#bound-column-metadata-cost-20261126)

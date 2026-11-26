@@ -1428,7 +1428,9 @@ UPDATE items SET label = '已复核' WHERE id = 42 RETURNING id, label;
 DELETE FROM items WHERE id = 43 RETURNING id;
 ```
 
-这一查找方式要求可用的新版主键索引和仍能使用当前索引的语句快照，适用于符合条件的 `READ COMMITTED` 或 `REPEATABLE READ` 事务。单列整数索引未命中、事务内已有写入、范围条件和旧索引都沿用表扫描。[测试范围](test-report.md#integer-primary-key-mutation-20261119)
+这一查找方式要求可用的新版主键索引和仍能使用当前索引的语句快照，适用于符合条件的 `READ COMMITTED` 或 `REPEATABLE READ` 事务。单行等值查找未命中时，数据库会继续检查表数据。 [测试范围](test-report.md#integer-primary-key-mutation-20261119)
+
+普通单表更新和删除也可通过整数主键范围查找，例如 `UPDATE items SET label='已复核' WHERE id BETWEEN 42 AND 49`。同一主键上的几段范围可以用 `OR` 连接。数据库先确定完整的候选行，再核对原条件、锁行和写入。需要读取过半表页、超出工作内存、使用旧索引、使用旧快照或同一事务已经写入时会扫描表。 [范围测试](test-report.md#key-range-mutations-20261126)
 
 带来源表的 `UPDATE ... FROM` 和 `DELETE ... USING` 也可用这个查找方式。条件开头需用同类型的整数值和目标表的主键作等值比较。核实索引命中后，数据库仍计算来源和完整条件。索引未命中时沿用原来的查找方式。[带来源表的测试](test-report.md#joined-primary-key-target-20261119)
 

@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 use complete integer primary-key ranges for ordinary UPDATE and DELETE",
+      "gap_ids": ["DML-01", "IDX-03", "TXN-01", "TXN-02"],
+      "status": "partial",
+      "evidence": ["src/commands/DmlExecutor.cpp", "src/commands/TableManage.cpp", "src/executor/ExecutionPlan.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/primary_key_range_mutation_protocol_e2e_test.py"],
+      "verification": [
+        "Compare affected keys, rollback on a failed constraint, old-snapshot fallback and command tags against PostgreSQL 18.6.",
+        "Observe fetched index targets, including empty ranges, and check low-memory and serializable fallbacks.",
+        "Recover committed, uncommitted and savepoint-rolled-back changes, and compare latency on tmpfs and ext4."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 avoid sorting unrelated catalog attributes and reuse bound view column types",
       "gap_ids": ["CAT-02", "QRY-12", "PROTO-04"],
       "status": "partial",
