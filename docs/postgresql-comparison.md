@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-27 · 回收的页交给下一次写入
+
+PostgreSQL 的普通 `VACUUM` 回收失去可见性的旧行空间，并用空闲空间图记录各页可用的空间。SQLite 在文件中另有整页的空闲链。DuckDB 的事务回滚会丢弃该事务所做的修改。 [PostgreSQL 清理](https://www.postgresql.org/docs/18/routine-vacuuming.html#VACUUM-FOR-SPACE-RECOVERY) · [PostgreSQL 空闲空间图](https://www.postgresql.org/docs/18/storage-fsm.html) · [SQLite 空闲页](https://www.sqlite.org/fileformat.html#the_freelist) · [DuckDB 事务](https://duckdb.org/docs/2.0/sql/statements/transactions#rolling-back-a-transaction)
+
+本项目将页内可用空间和整页空闲链独立记录。插入和更新必须先从空闲链取出整页，再开始写入。与 PostgreSQL 18.6 的复现对照核对了 SQL 行值和命令结果。 [测试报告](test-report.md#heap-page-reclaim-20261127)
+
 ## 2026-11-26 · 在扫描阶段先筛出待修改的行
 
 PostgreSQL 的扫描节点可以直接筛选记录，再把结果交给更新或删除节点。SQLite 也会先检查从索引即可判断的条件，只有符合条件时才读取表中对应的行。DuckDB 会把筛选移到更早执行的步骤，并按批次处理数据。 [PostgreSQL 执行计划](https://www.postgresql.org/docs/18/using-explain.html) · [SQLite 筛选优化](https://www.sqlite.org/optoverview.html) · [DuckDB 执行机制](https://duckdb.org/docs/2.0/internals/overview)

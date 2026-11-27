@@ -229,6 +229,59 @@ def main():
                 assert server["process"].poll() is None and time.monotonic() < deadline, "VACUUM fixture server failed to restart"
                 time.sleep(0.05)
 
+    def free_blocks(table):
+        image = (database / f"{table}.dt").read_bytes()
+        blocks = list(heap_pages(image))
+        head = struct.unpack_from("<I", image, 8)[0]
+        free = set()
+        while head:
+            assert 1 <= head <= len(blocks) and head not in free, (table, head, free)
+            assert blocks[head - 1][1:] == (0, []), (table, "occupied free block", head)
+            free.add(head)
+            head = struct.unpack_from("<I", image, (head + 1) * PAGE_SIZE - 4)[0]
+        return len(blocks), free
+
+    def check_reclaimed_pages():
+        payload = "x" * 1700
+        originals = [[str(id), payload] for id in range(1, 5)]
+        expected_by_table = {}
+        for action in ("insert", "update"):
+            table = f"vacuum_reuse_{action}"
+            query(f"CREATE TABLE {table} (id INT PRIMARY KEY, payload TEXT)", "CREATE TABLE")
+            seed = ",".join(f"({id},'{payload}')" for id in range(1, 5))
+            query(f"INSERT INTO {table} VALUES {seed}", "INSERT 0 4")
+            query("BEGIN", "BEGIN", b"T")
+            extra = ",".join(f"({id},'{payload}')" for id in range(5, 10))
+            query(f"INSERT INTO {table} VALUES {extra}", "INSERT 0 5", b"T")
+            query("ROLLBACK", "ROLLBACK")
+            query(f"VACUUM (PARALLEL 2) {table}", "VACUUM")
+            checkpoint()
+            assert free_blocks(table) == (3, {2, 3}), table
+            read_rows(table, originals)
+
+            if action == "insert":
+                query(f"INSERT INTO {table} VALUES (5,'{payload}')", "INSERT 0 1")
+                expected_by_table[table] = originals + [["5", payload]]
+            else:
+                modified = "y" * 1700
+                query(f"UPDATE {table} SET payload='{modified}' WHERE id=1", "UPDATE 1")
+                expected_by_table[table] = [["1", modified], *originals[1:]]
+            checkpoint()
+            count, free = free_blocks(table)
+            assert count == 3 and len(free) == 1 and free <= {2, 3}, (table, count, free)
+            read_rows(table, expected_by_table[table])
+
+        # The committed pages and the last such page selected by an open
+        # transaction must remain readable after process recovery.
+        query("BEGIN", "BEGIN", b"T")
+        pending = ",".join(f"({id},'{payload}')" for id in range(6, 10))
+        query(f"INSERT INTO vacuum_reuse_insert VALUES {pending}", "INSERT 0 4", b"T")
+        cold_restart(crash=True)
+        for table, expected in expected_by_table.items():
+            read_rows(table, expected)
+        query(f"INSERT INTO vacuum_reuse_update VALUES (5,'{payload}')", "INSERT 0 1")
+        read_rows("vacuum_reuse_update", expected_by_table["vacuum_reuse_update"] + [["5", payload]])
+
     def check_full(process_main):
         table = "vacuum_full_both" if process_main else "vacuum_full_toast"
         query(f"CREATE TABLE {table} (id INT PRIMARY KEY, payload TEXT)", "CREATE TABLE")
@@ -385,6 +438,7 @@ def main():
         check_full(process_main=False)
         check_full(process_main=True)
         check_full_without_toast_data()
+        check_reclaimed_pages()
         print("[VACUUM RELATION OPTIONS PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

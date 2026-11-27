@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-27 · 插入和更新复用空闲页时维护分配状态
+
+普通写入检查候选页是否仍在空闲链中，或者已被另一次写入占用。新分配的整页在首次写入结束前保留给分配者。 `DML-01`、`STO-05` 和 `WAL-05` 保持部分实现。 [功能验证](test-report.md#heap-page-reclaim-20261127) · [性能报告](performance-report-2026-10-30.md#heap-page-reclaim-cost-20261127)
+
 ## 2026-11-26 · 顺序扫描时提前筛选待修改的行
 
 普通单表更新和删除回退到顺序扫描时，可以在数据页上先检查整数主键范围，随后用完整条件筛选并锁行。扫描仍遵守当前事务的可见性，并包含本事务可见的写入。 `DML-01`、`OPT-03`、`TXN-01` 和 `TXN-02` 保持部分实现。 [功能验证](test-report.md#heap-range-mutations-20261126) · [性能报告](performance-report-2026-10-30.md#heap-range-mutation-cost-20261126)

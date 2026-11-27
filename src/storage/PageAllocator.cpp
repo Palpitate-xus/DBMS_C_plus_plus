@@ -482,6 +482,7 @@ bool PageAllocator::open() {
         bp_->close(/*flushPages=*/false);
         numPages_ = 0;
         freePages_.clear();
+        writeReservations_.clear();
         durableHeaderPresent_ = false;
         errno = savedError;
         throw;
@@ -507,6 +508,7 @@ void PageAllocator::close() {
     }
     numPages_ = 0;
     freePages_.clear();
+    writeReservations_.clear();
     durableHeaderPresent_ = false;
     // The cache is now closed; a subsequent opener may recover an actual
     // failed publication instead of rolling back underneath a live owner.
@@ -520,6 +522,28 @@ bool PageAllocator::isOpen() const {
 }
 
 uint32_t PageAllocator::allocPage() {
+    return allocPage(false);
+}
+
+PageAllocator::WriteReservation::WriteReservation(PageAllocator& allocator)
+    : allocator_(allocator), pageId_(allocator.allocPage(true)) {}
+
+PageAllocator::WriteReservation::~WriteReservation() {
+    if (pageId_) allocator_.releaseWriteReservation(pageId_);
+}
+
+void PageAllocator::releaseWriteReservation(uint32_t pageId) {
+    std::lock_guard<std::mutex> lock(allocMutex_);
+    writeReservations_.erase(pageId);
+}
+
+bool PageAllocator::isWritablePage(uint32_t pageId) const {
+    std::lock_guard<std::mutex> lock(allocMutex_);
+    return pageId > 0 && pageId < numPages_ &&
+        !freePages_.count(pageId) && !writeReservations_.count(pageId);
+}
+
+uint32_t PageAllocator::allocPage(bool reserveWrite) {
     if (!isOpen()) return 0;
     // The header page (free-list head, numPages) is read-modify-write state
     // shared by every allocator user; concurrent inserts may run under mere
@@ -528,6 +552,7 @@ uint32_t PageAllocator::allocPage() {
 
     char* fhBuf = bp_->fetchPage(0);
     if (!fhBuf) return 0;
+    AllocatorPagePin headerPin{*bp_, 0};
     DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(fhBuf);
     uint32_t pageId = 0;
 
@@ -535,52 +560,36 @@ uint32_t PageAllocator::allocPage() {
         // Reuse a page from the free list
         pageId = fh->freeListHead;
         if (pageId >= fh->numPages || pageId >= numPages_ ||
-            freePages_.count(pageId) == 0) {
-            bp_->unpinPage(0);
-            return 0;
-        }
+            freePages_.count(pageId) == 0) return 0;
         char* pageBuf = fetchPage(pageId);
-        if (!pageBuf) {
-            bp_->unpinPage(0);
-            return 0;
-        }
+        if (!pageBuf) return 0;
+        AllocatorPagePin pagePin{*bp_, pageId};
         PageWrapper page(pageBuf, pageSize_, formatVersion_);
         uint32_t nextFree = page.nextPage();
-        bp_->unpinPage(pageId);
 
-        if (nextFree >= fh->numPages || nextFree == pageId ||
-            (nextFree != 0 && freePages_.count(nextFree) == 0)) {
-            bp_->unpinPage(0);
-            return 0;
-        }
+        if (page.slotCount() != 0 || nextFree >= fh->numPages || nextFree == pageId ||
+            (nextFree != 0 && freePages_.count(nextFree) == 0)) return 0;
+        if (reserveWrite) writeReservations_.insert(pageId);
         fh->freeListHead = nextFree;
         freePages_.erase(pageId);
     } else {
         // Extend file with a new page
-        if (fh->numPages == std::numeric_limits<uint32_t>::max()) {
-            bp_->unpinPage(0);
-            return 0;
-        }
+        if (fh->numPages == std::numeric_limits<uint32_t>::max()) return 0;
         pageId = fh->numPages;
-        fh->numPages++;
 
         // Initialize the new page
         char* newBuf = bp_->fetchPage(pageId);
-        if (!newBuf) {
-            fh->numPages--;
-            bp_->unpinPage(0);
-            return 0;
-        }
+        if (!newBuf) return 0;
+        AllocatorPagePin pagePin{*bp_, pageId};
+        if (reserveWrite) writeReservations_.insert(pageId);
         PageWrapper newPage(newBuf, pageSize_, formatVersion_);
         newPage.init(pageId);
         bp_->markDirty(pageId);
-        bp_->unpinPage(pageId);
-        numPages_ = fh->numPages;
+        numPages_ = ++fh->numPages;
     }
 
     fh->headerChecksum = computeDataFileHeaderChecksum(*fh);
     bp_->markDirty(0);
-    bp_->unpinPage(0);
     return pageId;
 }
 
@@ -590,7 +599,7 @@ void PageAllocator::freePage(uint32_t pageId) {
     std::lock_guard<std::mutex> lock(allocMutex_);
     // A second release must not relink this page to itself or cut a cycle
     // through an interior free page. Membership also survives close/open.
-    if (pageId >= numPages_ || freePages_.count(pageId) != 0) return;
+    if (pageId >= numPages_ || freePages_.count(pageId) || writeReservations_.count(pageId)) return;
 
     char* fhBuf = bp_->fetchPage(0);
     if (!fhBuf) return;

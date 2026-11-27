@@ -45,6 +45,23 @@ public:
     // Reuses a page from the free list if available.
     uint32_t allocPage();
 
+    // Reserve the first write to a newly allocated or reclaimed page.
+    // Other heap writers must hold the page lock and check isWritablePage().
+    class WriteReservation {
+    public:
+        explicit WriteReservation(PageAllocator& allocator);
+        ~WriteReservation();
+        WriteReservation(const WriteReservation&) = delete;
+        WriteReservation& operator=(const WriteReservation&) = delete;
+        uint32_t pageId() const { return pageId_; }
+
+    private:
+        PageAllocator& allocator_;
+        const uint32_t pageId_;
+    };
+
+    bool isWritablePage(uint32_t pageId) const;
+
     // Free a data page, add it to the free list.
     void freePage(uint32_t pageId);
 
@@ -94,6 +111,7 @@ private:
     // Rebuilt from the persisted free chain at open, then kept under
     // allocMutex_. A page must occur only once in that chain.
     std::unordered_set<uint32_t> freePages_;
+    std::unordered_set<uint32_t> writeReservations_;
     std::unique_ptr<BufferPool> bp_;
     mutable std::mutex allocMutex_;
     mutable std::mutex flushMutex_;
@@ -106,6 +124,8 @@ private:
     bool flushWithAllocationMarker(bool allocationOnly);
     bool recoverPendingAllocationFlush();
     bool validateFileHeader(const DataFileHeader& fh) const;
+    uint32_t allocPage(bool reserveWrite);
+    void releaseWriteReservation(uint32_t pageId);
 };
 
 } // namespace dbms

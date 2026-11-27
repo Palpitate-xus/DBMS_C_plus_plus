@@ -33419,6 +33419,7 @@ DBStatus StorageEngine::insertInternal(
                 if (!locked) return wait ? DBStatus::LOCK_CONFLICT : DBStatus::OK;
 
                 HeapPageGuard guard{lockManager_, *pa, dbname, tablename, candidate};
+                if (!pa->isWritablePage(candidate)) return DBStatus::OK;
                 char* buf = pa->fetchPage(candidate);
                 if (!buf) {
                     return search == PageSearch::Alternative ? DBStatus::OK : DBStatus::IO_ERROR;
@@ -33471,7 +33472,8 @@ DBStatus StorageEngine::insertInternal(
         }
 
         if (pageId == 0) {
-            pageId = pa->allocPage();
+            const PageAllocator::WriteReservation reservation(*pa);
+            pageId = reservation.pageId();
             if (pageId == 0) {
                 return failBeforeHeapInsert(DBStatus::IO_ERROR);
             }
@@ -39824,13 +39826,14 @@ DBStatus StorageEngine::updateInternal(
             // while the writer can see it immediately.  OLD remains intact
             // until its xmax/ctid are changed below.
             auto* fsm = getFSM(dbname, tablename);
-            auto tryInsertVersion = [&](uint32_t candidate, bool probe, bool& inserted,
+            auto tryInsertVersion = [&](uint32_t candidate, bool probe, bool reserved, bool& inserted,
                                         uint16_t& insertedSlot) -> DBStatus {
                 const bool locked = probe
                     ? lockManager_.pageLockExclusiveNoWait(dbname, tablename, candidate)
                     : lockManager_.pageLockExclusive(dbname, tablename, candidate);
                 if (!locked) return probe ? DBStatus::OK : DBStatus::LOCK_CONFLICT;
                 HeapPageGuard pageGuard{lockManager_, *pa, dbname, tablename, candidate};
+                if (!reserved && !pa->isWritablePage(candidate)) return DBStatus::OK;
                 char* buffer = pa->fetchPage(candidate);
                 if (!buffer) return probe ? DBStatus::OK : DBStatus::IO_ERROR;
                 pageGuard.pinned = true;
@@ -39909,7 +39912,7 @@ DBStatus StorageEngine::updateInternal(
             // Try the current page first, then a free-space hint. The page
             // lock and actual fit check still decide whether we can write.
             if (pageId > 0 && pageId < pageCount) {
-                insertStatus = tryInsertVersion(pageId, true, inserted, newSlotId);
+                insertStatus = tryInsertVersion(pageId, true, false, inserted, newSlotId);
                 if (inserted) newPageId = pageId;
             }
             if (insertStatus == DBStatus::OK && !inserted && pageCount > 1) {
@@ -39918,23 +39921,24 @@ DBStatus StorageEngine::updateInternal(
                 uint32_t hint = fsm->findPage(minPercent);
                 if (hint == pageId) hint = fsm->findPage(minPercent, pageId + 1);
                 if (hint > 0 && hint < pageCount) {
-                    insertStatus = tryInsertVersion(hint, true, inserted, newSlotId);
+                    insertStatus = tryInsertVersion(hint, true, false, inserted, newSlotId);
                     if (inserted) newPageId = hint;
                 }
             }
             for (uint32_t candidate = 1;
                  insertStatus == DBStatus::OK && candidate < pageCount && !inserted; ++candidate) {
                 insertStatus = tryInsertVersion(
-                    candidate, false, inserted, newSlotId);
+                    candidate, false, false, inserted, newSlotId);
                 if (inserted) newPageId = candidate;
             }
             if (insertStatus == DBStatus::OK && !inserted) {
-                newPageId = pa->allocPage();
+                const PageAllocator::WriteReservation reservation(*pa);
+                newPageId = reservation.pageId();
                 if (newPageId == 0) {
                     insertStatus = DBStatus::IO_ERROR;
                 } else {
                     insertStatus = tryInsertVersion(
-                        newPageId, false, inserted, newSlotId);
+                        newPageId, false, true, inserted, newSlotId);
                     if (insertStatus == DBStatus::OK && !inserted)
                         insertStatus = DBStatus::INVALID_VALUE;
                 }
@@ -57580,6 +57584,7 @@ size_t StorageEngine::vacuum(const std::string& dbname,
         RestoreVacuumLocks restorePageLocks{lockManager_, locksBeforePage};
         if (!lockManager_.pageLockExclusive(dbname, tablename, pid))
             throw DbError("55P03", "could not obtain heap page lock during VACUUM");
+        if (!pa->isWritablePage(pid)) return false;
         char* buf = pa->fetchPage(pid);
         if (!buf) throw DbError("58030", "could not read heap page during VACUUM");
         struct PagePinGuard {

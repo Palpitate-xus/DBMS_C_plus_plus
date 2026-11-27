@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>清理表后，重启也能读到新写入的数据</summary>
+
+插入或更新复用 `VACUUM` 腾出的空间时，数据库会先把这块空间从空闲清单里取出，避免新数据写进去后，重启却打不开这张表。
+
+2026-11-27 · [测试报告](docs/test-report.md#heap-page-reclaim-20261127) · [性能报告](docs/performance-report-2026-10-30.md#heap-page-reclaim-cost-20261127)
+
+</details>
+
+<details>
 <summary>一笔事务里连续修改订单更快了</summary>
 
 例如，先改一笔订单，再按编号批量更新或删除时，即使要扫描整张表，数据库也能先检查编号，只对符合范围的订单检查其余条件。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按一段编号批量更新或删除更快了</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 按一段编号批量更新或删除更快了
 
 例如，要删除编号 42 到 49 的订单，数据库可以直接找到这几笔。
 
-2026-11-26 · [用法](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#key-range-mutations-20261126) · [性能报告](docs/performance-report-2026-10-30.md#key-range-mutation-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
+[用法](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#key-range-mutations-20261126) · [性能报告](docs/performance-report-2026-10-30.md#key-range-mutation-cost-20261126)
 
 ## 2026-11-26 · 表多时，查询可以更快返回列名
 

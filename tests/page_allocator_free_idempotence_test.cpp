@@ -150,6 +150,40 @@ static void invalidCalls() {
     check(allocator.allocPage()==2 && valueIs(allocator,1,'A'),"invalid-free-followed-by-allocation",caseId);
 }
 
+static void reservedWrites() {
+    const size_t caseId = cases++;
+    PageAllocator allocator("reserved_write.dt", 32);
+    require(allocator.open(), "open reservation fixture");
+    require(allocator.allocPage() == 1, "allocate page to reclaim");
+    allocator.freePage(1);
+    check(!allocator.isWritablePage(1), "listed-page-excluded", caseId);
+    {
+        const PageAllocator::WriteReservation write(allocator);
+        require(write.pageId() == 1, "reserve reclaimed page");
+        bool excluded = false;
+        uint32_t other = 0;
+        std::thread peer([&] {
+            excluded = !allocator.isWritablePage(1);
+            allocator.freePage(1);
+            other = allocator.allocPage();
+        });
+        peer.join();
+        check(excluded && other == 2, "peer-cannot-write-or-free-reservation", caseId);
+        require(writeValue(allocator, 1, 'R'), "first reserved write");
+    }
+    check(allocator.isWritablePage(1) && valueIs(allocator, 1, 'R'), "release-allows-later-writes", caseId);
+    {
+        const PageAllocator::WriteReservation unused(allocator);
+        require(unused.pageId() == 3, "reserve new page");
+        check(!allocator.isWritablePage(3), "new-reservation-excluded", caseId);
+    }
+    check(allocator.isWritablePage(3), "unused-reservation-released", caseId);
+    require(allocator.flush(), "flush reservation fixture");
+    allocator.close();
+    require(allocator.open(), "reopen reservation fixture");
+    check(allocator.isWritablePage(1) && valueIs(allocator, 1, 'R'), "reclaimed-block-reopens", caseId);
+}
+
 int main() {
     try {
         for(unsigned count:{1U,2U,7U,17U})
@@ -161,10 +195,11 @@ int main() {
             for(unsigned threads:{2U,8U})
                 for(bool reopen:{false,true}) exercise(count,0,0,reopen,threads);
         invalidCalls();
+        reservedWrites();
     } catch(const std::exception& error) {
         std::cout << "FREE_PAGE_CONTROL_ERROR " << error.what() << '\n';
     }
-    const bool complete=cases==199 && controls==798 && setups==0;
+    const bool complete=cases==200 && controls==804 && setups==0;
     std::cout << "PAGE_ALLOCATOR_FREE_IDEMPOTENCE_COMPLETE " << controls << " FAILURES " << failures
               << " CASES " << cases << " SETUP_ERRORS " << setups << std::endl;
     return complete && failures==0 ? 0 : 1;

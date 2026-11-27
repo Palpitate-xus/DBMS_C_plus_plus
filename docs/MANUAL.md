@@ -1267,6 +1267,8 @@ TRUNCATE TABLE parent RESTART IDENTITY CASCADE;
 
 `VACUUM` 清理删除或更新留下的空间，供这张表后续写入时复用。没有额外存放长值时，可以省掉查找这些值的第二遍扫描。有外置长值时，数据库检查哪些值还被引用，再清理失去引用的值。
 
+普通插入和更新复用一整块空闲页时，先通过页分配器取出该页，再进行首次写入。 [复用及重启测试](test-report.md#heap-page-reclaim-20261127)
+
 ```sql
 CREATE TABLE vacuum_example (id integer PRIMARY KEY, note text);
 INSERT INTO vacuum_example VALUES (1, '保留'), (2, '删除'), (3, NULL);
