@@ -282,6 +282,47 @@ def main():
         query(f"INSERT INTO vacuum_reuse_update VALUES (5,'{payload}')", "INSERT 0 1")
         read_rows("vacuum_reuse_update", expected_by_table["vacuum_reuse_update"] + [["5", payload]])
 
+    def check_reclaimed_page_search():
+        def buffer_requests():
+            frames = client.simple_query(server["sock"], "SHOW STATUS")
+            result, state, message, _, _ = runner.decode_wire_result(frames)
+            assert state is None, message
+            stats = dict(result)
+            return int(stats["buffer_pool_hits"]) + int(stats["buffer_pool_misses"])
+
+        table = "vacuum_reuse_dense"
+        payload = "z" * 1700
+        query(f"CREATE TABLE {table} (id INT PRIMARY KEY, payload TEXT)", "CREATE TABLE")
+        query("BEGIN", "BEGIN", b"T")
+        for start in range(1, 257, 64):
+            batch = ",".join(f"({id},'{payload}')" for id in range(start, start + 64))
+            query(f"INSERT INTO {table} VALUES {batch}", "INSERT 0 64", b"T")
+        query("COMMIT", "COMMIT")
+        query("BEGIN", "BEGIN", b"T")
+        query(f"INSERT INTO {table} VALUES (257,'{payload}')", "INSERT 0 1", b"T")
+        query("ROLLBACK", "ROLLBACK")
+        cases = (
+            (f"INSERT INTO {table} VALUES (257,'{payload}')", "INSERT 0 1"),
+            (f"UPDATE {table} SET payload='{'y' * 1700}' WHERE id=1", "UPDATE 1"),
+        )
+        for sql, tag in cases:
+            query(f"VACUUM {table}", "VACUUM")
+            checkpoint()
+            assert free_blocks(table) == (65, {65})
+            query("BEGIN", "BEGIN", b"T")
+            before = buffer_requests()
+            query(sql, tag, b"T")
+            # The single write may read metadata and its target. Searching
+            # all 64 occupied heap blocks adds at least 64 buffer requests.
+            requests = buffer_requests() - before
+            assert 0 < requests < 64, (tag, requests)
+            query("ROLLBACK", "ROLLBACK")
+            read_rows(table, [[str(id), payload] for id in range(1, 257)])
+        query(f"VACUUM {table}", "VACUUM")
+        query(f"UPDATE {table} SET payload='short' WHERE id=1", "UPDATE 1")
+        checkpoint()
+        assert free_blocks(table) == (65, {65}), "a fitting current page takes priority"
+
     def check_full(process_main):
         table = "vacuum_full_both" if process_main else "vacuum_full_toast"
         query(f"CREATE TABLE {table} (id INT PRIMARY KEY, payload TEXT)", "CREATE TABLE")
@@ -439,6 +480,7 @@ def main():
         check_full(process_main=True)
         check_full_without_toast_data()
         check_reclaimed_pages()
+        check_reclaimed_page_search()
         print("[VACUUM RELATION OPTIONS PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

@@ -1269,6 +1269,8 @@ TRUNCATE TABLE parent RESTART IDENTITY CASCADE;
 
 普通插入和更新复用一整块空闲页时，先通过页分配器取出该页，再进行首次写入。 [复用及重启测试](test-report.md#heap-page-reclaim-20261127)
 
+常用的写入位置放不下记录时，可以在逐页查找前直接从空闲清单取出一页。没有可取的页时，仍检查旧页的剩余空间再决定是否扩展文件。 [缓冲区读取测试](test-report.md#direct-reclaimed-page-write-20261127)
+
 ```sql
 CREATE TABLE vacuum_example (id integer PRIMARY KEY, note text);
 INSERT INTO vacuum_example VALUES (1, '保留'), (2, '删除'), (3, NULL);

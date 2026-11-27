@@ -1,6 +1,7 @@
 #include "access/BPTree.h"
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
+#include "storage/PageAllocator.h"
 #include "storage/WAL.h"
 #include "test_utils.h"
 
@@ -52,10 +53,11 @@ private:
     bool injected_ = false;
 };
 
-void assertOriginal(const std::string& database) {
-    assert(g_engine.query(database, "t", {"=value original"}, {"id"})
+void assertOriginal(const std::string& database, const std::string& original,
+                    const std::string& changed) {
+    assert(g_engine.query(database, "t", {"=value " + original}, {"id"})
                .size() == 1);
-    assert(g_engine.query(database, "t", {"=value changed"}, {"id"})
+    assert(g_engine.query(database, "t", {"=value " + changed}, {"id"})
                .empty());
     int64_t rid = -1;
     dbms::BPTree* primary = g_engine.getPKIndex(database, "t");
@@ -63,8 +65,10 @@ void assertOriginal(const std::string& database) {
     assert(primary->search("1", rid));
 }
 
-void test_update_stops_before_heap_when_wal_fails() {
-    const std::string testName = "update_wal_failure";
+void test_update_stops_before_heap_when_wal_fails(bool reclaimedPage) {
+    const std::string testName = reclaimedPage ? "update_reclaimed_wal_failure" : "update_wal_failure";
+    const std::string original = reclaimedPage ? std::string(1700, 'o') : "original";
+    const std::string changed = reclaimedPage ? std::string(1700, 'c') : "changed";
     const std::string database = testDbPath(testName);
     cleanupTestDb(testName);
     assert(g_engine.createDatabase(database, "utf8") == dbms::DBStatus::OK);
@@ -73,11 +77,25 @@ void test_update_stops_before_heap_when_wal_fails() {
     schema.tablename = "t";
     schema.formatVersion = 2;
     schema.append(dbms::makeIntColumn("id", false, 4, true));
-    schema.append(dbms::makeVarCharColumn("value", false, 40));
+    schema.append(dbms::makeVarCharColumn("value", false, reclaimedPage ? 1700 : 40));
     assert(g_engine.createTable(database, schema) == dbms::DBStatus::OK);
     assert(g_engine.insert(
-               database, "t", {{"id", "1"}, {"value", "original"}}) ==
+               database, "t", {{"id", "1"}, {"value", original}}) ==
            dbms::DBStatus::OK);
+    if (reclaimedPage) {
+        const std::string filler(1700, 'z');
+        for (int id = 2; id <= 4; ++id) {
+            assert(g_engine.insert(database, "t", {{"id", std::to_string(id)}, {"value", filler}}) ==
+                   dbms::DBStatus::OK);
+        }
+        assert(g_engine.beginTransaction(database) == dbms::DBStatus::OK);
+        assert(g_engine.insert(database, "t", {{"id", "5"}, {"value", filler}}) ==
+               dbms::DBStatus::OK);
+        assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+        assert(g_engine.vacuum(database, "t") == 1);
+        auto* pages = g_engine.getPageAllocator(database, "t");
+        assert(pages && pages->numPages() == 3 && !pages->isWritablePage(2));
+    }
     assert(g_engine.createTrigger(database, {
                "break_wal", "before", "update", "t", "break_wal", "",
                true, true, {}}) == dbms::DBStatus::OK);
@@ -100,7 +118,7 @@ void test_update_stops_before_heap_when_wal_fails() {
     });
 
     const dbms::DBStatus status = g_engine.update(
-        database, "t", {{"value", "changed"}}, {"=id 1"});
+        database, "t", {{"value", changed}}, {"=id 1"});
     g_engine.setTriggerExecutor({});
     if (failure.injected()) failure.restore();
 
@@ -108,14 +126,19 @@ void test_update_stops_before_heap_when_wal_fails() {
     assert(!afterFired);
     assert(status == dbms::DBStatus::IO_ERROR);
     assert(!g_engine.inTransaction());
-    assertOriginal(database);
+    assertOriginal(database, original, changed);
+    if (reclaimedPage) {
+        auto* pages = g_engine.getPageAllocator(database, "t");
+        assert(pages && pages->numPages() == 3 && pages->isWritablePage(2));
+    }
 
     // A healthy WAL accepts the same UPDATE after the failed attempt.
     assert(g_engine.update(
-               database, "t", {{"value", "changed"}}, {"=id 1"}) ==
+               database, "t", {{"value", changed}}, {"=id 1"}) ==
            dbms::DBStatus::OK);
-    assert(g_engine.query(database, "t", {"=value changed"}, {"id"})
+    assert(g_engine.query(database, "t", {"=value " + changed}, {"id"})
                .size() == 1);
+    if (reclaimedPage) assert(g_engine.getPageAllocator(database, "t")->numPages() == 3);
 
     cleanupTestDb(testName);
     std::cout << "[UPDATE WAL FAILURE] failed WAL left heap and index untouched OK"
@@ -126,7 +149,8 @@ void test_update_stops_before_heap_when_wal_fails() {
 
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
-    test_update_stops_before_heap_when_wal_fails();
+    test_update_stops_before_heap_when_wal_fails(false);
+    test_update_stops_before_heap_when_wal_fails(true);
     finalCleanupTestData();
     return 0;
 }

@@ -152,23 +152,32 @@ static void invalidCalls() {
 
 static void reservedWrites() {
     const size_t caseId = cases++;
+    using Reservation = PageAllocator::WriteReservation;
     PageAllocator allocator("reserved_write.dt", 32);
     require(allocator.open(), "open reservation fixture");
+    {
+        const Reservation none(allocator, Reservation::Policy::ReuseOnly);
+        check(!none.pageId() && allocator.numPages() == 1, "no-free-page-does-not-extend", caseId);
+    }
     require(allocator.allocPage() == 1, "allocate page to reclaim");
     allocator.freePage(1);
     check(!allocator.isWritablePage(1), "listed-page-excluded", caseId);
     {
-        const PageAllocator::WriteReservation write(allocator);
+        const Reservation write(allocator, Reservation::Policy::ReuseOnly);
         require(write.pageId() == 1, "reserve reclaimed page");
         bool excluded = false;
+        bool noReuse = false;
         uint32_t other = 0;
         std::thread peer([&] {
             excluded = !allocator.isWritablePage(1);
             allocator.freePage(1);
+            const Reservation none(allocator, Reservation::Policy::ReuseOnly);
+            noReuse = !none.pageId() && allocator.numPages() == 2;
             other = allocator.allocPage();
         });
         peer.join();
         check(excluded && other == 2, "peer-cannot-write-or-free-reservation", caseId);
+        check(noReuse, "separate-reuse-cannot-extend-or-steal", caseId);
         require(writeValue(allocator, 1, 'R'), "first reserved write");
     }
     check(allocator.isWritablePage(1) && valueIs(allocator, 1, 'R'), "release-allows-later-writes", caseId);
@@ -199,7 +208,7 @@ int main() {
     } catch(const std::exception& error) {
         std::cout << "FREE_PAGE_CONTROL_ERROR " << error.what() << '\n';
     }
-    const bool complete=cases==200 && controls==804 && setups==0;
+    const bool complete=cases==200 && controls==806 && setups==0;
     std::cout << "PAGE_ALLOCATOR_FREE_IDEMPOTENCE_COMPLETE " << controls << " FAILURES " << failures
               << " CASES " << cases << " SETUP_ERRORS " << setups << std::endl;
     return complete && failures==0 ? 0 : 1;

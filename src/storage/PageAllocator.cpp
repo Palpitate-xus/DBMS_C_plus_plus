@@ -522,11 +522,11 @@ bool PageAllocator::isOpen() const {
 }
 
 uint32_t PageAllocator::allocPage() {
-    return allocPage(false);
+    return allocPage(false, WriteReservation::Policy::ReuseOrExtend);
 }
 
-PageAllocator::WriteReservation::WriteReservation(PageAllocator& allocator)
-    : allocator_(allocator), pageId_(allocator.allocPage(true)) {}
+PageAllocator::WriteReservation::WriteReservation(PageAllocator& allocator, Policy policy)
+    : allocator_(allocator), pageId_(allocator.allocPage(true, policy)) {}
 
 PageAllocator::WriteReservation::~WriteReservation() {
     if (pageId_) allocator_.releaseWriteReservation(pageId_);
@@ -543,12 +543,13 @@ bool PageAllocator::isWritablePage(uint32_t pageId) const {
         !freePages_.count(pageId) && !writeReservations_.count(pageId);
 }
 
-uint32_t PageAllocator::allocPage(bool reserveWrite) {
+uint32_t PageAllocator::allocPage(bool reserveWrite, WriteReservation::Policy policy) {
     if (!isOpen()) return 0;
     // The header page (free-list head, numPages) is read-modify-write state
     // shared by every allocator user; concurrent inserts may run under mere
     // intent locks, so serialize the whole allocation decision.
     std::lock_guard<std::mutex> lock(allocMutex_);
+    if (policy == WriteReservation::Policy::ReuseOnly && freePages_.empty()) return 0;
 
     char* fhBuf = bp_->fetchPage(0);
     if (!fhBuf) return 0;

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>大表清理后，插入和更新更快了</summary>
+
+例如给一张很大的订单表添一笔，数据库可以直接复用清理出的空页，省去逐页寻找写入位置的时间。更新也可以这样复用空间。
+
+2026-11-27 · [测试报告](docs/test-report.md#direct-reclaimed-page-write-20261127) · [性能报告](docs/performance-report-2026-10-30.md#direct-reclaimed-page-cost-20261127)
+
+</details>
+
+<details>
 <summary>清理表后，重启也能读到新写入的数据</summary>
 
 插入或更新复用 `VACUUM` 腾出的空间时，数据库会先把这块空间从空闲清单里取出，避免新数据写进去后，重启却打不开这张表。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按编号和状态批量处理订单更快了</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 按编号和状态批量处理订单更快了
 
 例如，要更新编号 300 到 308 中待处理的订单，数据库可以先找到这段订单，再检查哪些尚未处理。删除时也可以这样筛选。
 
-2026-11-26 · [用法](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#filtered-key-mutations-20261126) · [性能报告](docs/performance-report-2026-10-30.md#filtered-key-mutation-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
+[用法](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#filtered-key-mutations-20261126) · [性能报告](docs/performance-report-2026-10-30.md#filtered-key-mutation-cost-20261126)
 
 ## 2026-11-26 · 按一段编号批量更新或删除更快了
 

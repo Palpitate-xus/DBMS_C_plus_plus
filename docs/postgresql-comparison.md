@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-27 · 在逐页寻找空间之前复用空页
+
+PostgreSQL 18.6 的写入可以从缓存的目标页或空闲空间图查找存放位置，拿到页锁后再验证容量。SQLite 的页分配器优先复用空闲链中的整页。DuckDB 1.4.3 在同一个锁中从空闲集合取出块，空闲集合为空时才扩展文件。 [PostgreSQL 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/heap/hio.c) · [SQLite 源码](https://www3.sqlite.org/matrix/ev/src/btree.html) · [DuckDB 源码](https://github.com/duckdb/duckdb/blob/v1.4.3/src/storage/single_file_block_manager.cpp)
+
+本项目先尝试现有的候选页，随后可在扫描整张表前取用回收的整页。这个取页操作只复用已有页。没有可复用的整页时，继续走原有的搜索和扩展流程。 [性能报告](performance-report-2026-10-30.md#direct-reclaimed-page-cost-20261127)
+
 ## 2026-11-27 · 回收的页交给下一次写入
 
 PostgreSQL 的普通 `VACUUM` 回收失去可见性的旧行空间，并用空闲空间图记录各页可用的空间。SQLite 在文件中另有整页的空闲链。DuckDB 的事务回滚会丢弃该事务所做的修改。 [PostgreSQL 清理](https://www.postgresql.org/docs/18/routine-vacuuming.html#VACUUM-FOR-SPACE-RECOVERY) · [PostgreSQL 空闲空间图](https://www.postgresql.org/docs/18/storage-fsm.html) · [SQLite 空闲页](https://www.sqlite.org/fileformat.html#the_freelist) · [DuckDB 事务](https://duckdb.org/docs/2.0/sql/statements/transactions#rolling-back-a-transaction)

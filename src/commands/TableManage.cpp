@@ -33401,6 +33401,8 @@ DBStatus StorageEngine::insertInternal(
     uint32_t pageId = 0;
     uint16_t slotId = 0;
     {
+        using Reservation = PageAllocator::WriteReservation;
+        std::optional<Reservation> reservation;
         const uint32_t numPages = pa->numPages();
         const size_t actualRowSize = rowBuffer.size();
         const size_t pageSize = pa->pageSize();
@@ -33465,46 +33467,42 @@ DBStatus StorageEngine::insertInternal(
                 const DBStatus status = tryExistingPage(lastPage, PageSearch::Alternative);
                 if (status != DBStatus::OK) return failBeforeHeapInsert(status);
             }
-            for (uint32_t candidate = 1; candidate < numPages && pageId == 0; ++candidate) {
-                const DBStatus status = tryExistingPage(candidate, PageSearch::OrderedScan);
-                if (status != DBStatus::OK) return failBeforeHeapInsert(status);
+            if (pageId == 0 && !reservation.emplace(*pa, Reservation::Policy::ReuseOnly).pageId()) {
+                // With no reclaimed block, keep the full search before extending.
+                for (uint32_t candidate = 1; candidate < numPages && pageId == 0; ++candidate) {
+                    const DBStatus status = tryExistingPage(candidate, PageSearch::OrderedScan);
+                    if (status != DBStatus::OK) return failBeforeHeapInsert(status);
+                }
             }
         }
 
         if (pageId == 0) {
-            const PageAllocator::WriteReservation reservation(*pa);
-            pageId = reservation.pageId();
+            if (!reservation || !reservation->pageId()) reservation.emplace(*pa);
+            pageId = reservation->pageId();
             if (pageId == 0) {
                 return failBeforeHeapInsert(DBStatus::IO_ERROR);
             }
-            if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
-                return failBeforeHeapInsert(DBStatus::LOCK_CONFLICT);
-            }
-            char* buf = pa->fetchPage(pageId);
-            if (!buf) {
-                lockManager_.pageUnlock(dbname, tablename, pageId);
-                return failBeforeHeapInsert(DBStatus::IO_ERROR);
-            }
-            PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
-            const Lsn beforeLsn = walPageImage(
-                dbname, tablename, pageId, buf, pa->pageSize(),
-                true, heapFork);
-            if (beforeLsn == INVALID_LSN) {
-                pa->unpinPage(pageId);
-                lockManager_.pageUnlock(dbname, tablename, pageId);
-                return failBeforeHeapInsert(DBStatus::IO_ERROR);
-            }
-            if (!page.insert(rowBuffer.data(), actualRowSize, slotId)) {
-                pa->unpinPage(pageId);
-                lockManager_.pageUnlock(dbname, tablename, pageId);
-                return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
-            }
-            pa->markDirty(pageId);
-            size_t freePct = page.freeSpace() * 100 / pa->pageSize();
-            getFSM(dbname, tablename)->setFreePercent(pageId, static_cast<uint8_t>(freePct));
-            getVM(dbname, tablename)->setAllVisible(pageId, false);
-            pa->unpinPage(pageId);
-            lockManager_.pageUnlock(dbname, tablename, pageId);
+            const auto writeStatus = [&] {
+                if (!lockManager_.pageLockExclusive(dbname, tablename, pageId))
+                    return DBStatus::LOCK_CONFLICT;
+                HeapPageGuard guard{lockManager_, *pa, dbname, tablename, pageId};
+                char* buf = pa->fetchPage(pageId);
+                if (!buf) return DBStatus::IO_ERROR;
+                guard.pinned = true;
+                PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
+                const Lsn beforeLsn = walPageImage(
+                    dbname, tablename, pageId, buf, pageSize, true, heapFork);
+                if (beforeLsn == INVALID_LSN) return DBStatus::IO_ERROR;
+                if (!page.insert(rowBuffer.data(), actualRowSize, slotId))
+                    return DBStatus::INVALID_VALUE;
+                pa->markDirty(pageId);
+                const size_t freePct = page.freeSpace() * 100 / pa->pageSize();
+                getFSM(dbname, tablename)->setFreePercent(pageId, static_cast<uint8_t>(freePct));
+                getVM(dbname, tablename)->setAllVisible(pageId, false);
+                return DBStatus::OK;
+            }();
+            reservation.reset();
+            if (writeStatus != DBStatus::OK) return failBeforeHeapInsert(writeStatus);
         }
     }
 
@@ -39908,6 +39906,8 @@ DBStatus StorageEngine::updateInternal(
             uint16_t newSlotId = 0;
             bool inserted = false;
             DBStatus insertStatus = DBStatus::OK;
+            using Reservation = PageAllocator::WriteReservation;
+            std::optional<Reservation> reservation;
             const uint32_t pageCount = pa->numPages();
             // Try the current page first, then a free-space hint. The page
             // lock and actual fit check still decide whether we can write.
@@ -39925,15 +39925,16 @@ DBStatus StorageEngine::updateInternal(
                     if (inserted) newPageId = hint;
                 }
             }
+            if (insertStatus == DBStatus::OK && !inserted && pageCount > 1)
+                newPageId = reservation.emplace(*pa, Reservation::Policy::ReuseOnly).pageId();
             for (uint32_t candidate = 1;
-                 insertStatus == DBStatus::OK && candidate < pageCount && !inserted; ++candidate) {
+                 insertStatus == DBStatus::OK && candidate < pageCount && !newPageId; ++candidate) {
                 insertStatus = tryInsertVersion(
                     candidate, false, false, inserted, newSlotId);
                 if (inserted) newPageId = candidate;
             }
             if (insertStatus == DBStatus::OK && !inserted) {
-                const PageAllocator::WriteReservation reservation(*pa);
-                newPageId = reservation.pageId();
+                if (!newPageId) newPageId = reservation.emplace(*pa).pageId();
                 if (newPageId == 0) {
                     insertStatus = DBStatus::IO_ERROR;
                 } else {
@@ -39943,6 +39944,7 @@ DBStatus StorageEngine::updateInternal(
                         insertStatus = DBStatus::INVALID_VALUE;
                 }
             }
+            reservation.reset();
             if (insertStatus != DBStatus::OK) {
                 // NEW never became reachable, so remove its external values
                 // directly.  Abort the transaction to undo earlier rows from

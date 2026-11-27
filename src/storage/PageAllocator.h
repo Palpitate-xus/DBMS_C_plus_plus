@@ -49,7 +49,8 @@ public:
     // Other heap writers must hold the page lock and check isWritablePage().
     class WriteReservation {
     public:
-        explicit WriteReservation(PageAllocator& allocator);
+        enum class Policy { ReuseOrExtend, ReuseOnly };
+        explicit WriteReservation(PageAllocator& allocator, Policy policy = Policy::ReuseOrExtend);
         ~WriteReservation();
         WriteReservation(const WriteReservation&) = delete;
         WriteReservation& operator=(const WriteReservation&) = delete;
@@ -124,7 +125,7 @@ private:
     bool flushWithAllocationMarker(bool allocationOnly);
     bool recoverPendingAllocationFlush();
     bool validateFileHeader(const DataFileHeader& fh) const;
-    uint32_t allocPage(bool reserveWrite);
+    uint32_t allocPage(bool reserveWrite, WriteReservation::Policy policy);
     void releaseWriteReservation(uint32_t pageId);
 };
 

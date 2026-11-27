@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-27 claim a reclaimed heap page before searching the entire relation",
+      "gap_ids": ["DML-01", "STO-05"],
+      "status": "partial",
+      "evidence": ["src/storage/PageAllocator.cpp", "src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/vacuum_relation_options_protocol_e2e_test.py", "tests/page_allocator_free_idempotence_test.cpp"],
+      "verification": [
+        "Count buffer accesses with 64 occupied heap pages and a reclaimed page. Check that fitting current pages keep priority and an empty free list does not extend the file during the reuse attempt.",
+        "Compare returned rows and disk extent after rollback. Verify files from the prior build and committed, uncommitted, and savepoint recovery.",
+        "Compare latency at 64 and 384 occupied heap pages with the prior build twice and PostgreSQL 18.6 on ext4 and tmpfs."
+      ]
+    },
+
+    {
       "issue": "2026-11-27 reserve reclaimed heap pages for their first write",
       "gap_ids": ["DML-01", "STO-05", "WAL-05"],
       "status": "partial",
